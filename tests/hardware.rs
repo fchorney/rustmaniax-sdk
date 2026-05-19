@@ -160,27 +160,28 @@ fn hardware_config_get_set() {
     let pad = if mgr.get_info(0).connected { 0 } else { 1 };
 
     let original = mgr.get_config(pad).expect("Config not available");
-    let orig_debounce = { original.panel_debounce_us };
+    let orig_debounce = unsafe { std::ptr::addr_of!(original.panel_debounce_us).read_unaligned() };
     println!("Original panelDebounceMicroseconds: {orig_debounce}");
 
     // Modify and write.
     let mut modified = original;
-    modified.panel_debounce_us = if orig_debounce == 4000 { 5000 } else { 4000 };
+    let new_val: u16 = if orig_debounce == 4000 { 5000 } else { 4000 };
+    unsafe { std::ptr::addr_of_mut!(modified.panel_debounce_us).write_unaligned(new_val) };
     mgr.set_config(pad, modified);
     std::thread::sleep(Duration::from_secs(2));
 
     // Read back.
     let readback = mgr.get_config(pad).unwrap();
-    let rb_debounce = { readback.panel_debounce_us };
+    let rb_debounce = unsafe { std::ptr::addr_of!(readback.panel_debounce_us).read_unaligned() };
     println!("Read back panelDebounceMicroseconds: {rb_debounce}");
-    assert_eq!(rb_debounce, { modified.panel_debounce_us });
+    assert_eq!(rb_debounce, new_val);
 
     // Restore original.
     mgr.set_config(pad, original);
     std::thread::sleep(Duration::from_secs(2));
 
     let restored = mgr.get_config(pad).unwrap();
-    let res_debounce = { restored.panel_debounce_us };
+    let res_debounce = unsafe { std::ptr::addr_of!(restored.panel_debounce_us).read_unaligned() };
     println!("Restored panelDebounceMicroseconds: {res_debounce}");
     assert_eq!(res_debounce, orig_debounce);
 }
