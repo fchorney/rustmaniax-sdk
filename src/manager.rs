@@ -49,7 +49,7 @@ struct ManagerState {
     devices: [SmxDevice; 2],
     poll_handles: [Option<PollHandle>; 2],
     enumerator: Box<dyn HidEnumerator>,
-    callback: Box<dyn Fn(SmxEvent) + Send>,
+    callback: Arc<dyn Fn(SmxEvent) + Send + Sync>,
     last_enumeration: Option<Instant>,
 
     // Panel test mode.
@@ -60,13 +60,16 @@ struct ManagerState {
     // Lights command queue.
     pending_lights: Vec<PendingLightsCommand>,
     delay_lights_until: Option<Instant>,
+
+    // Input state tracking for change detection.
+    last_input_state: [u16; 2],
 }
 
 impl SmxManager {
     /// Creates a manager using the real hidapi enumerator.
     /// If `SMX_CAPTURE_DIR` is set, wraps it with a recording layer that writes
     /// `.smxhid` files directly into that directory (overwriting previous captures).
-    pub fn start(callback: impl Fn(SmxEvent) + Send + 'static) -> Result<Self, crate::error::SmxError> {
+    pub fn start(callback: impl Fn(SmxEvent) + Send + Sync + 'static) -> Result<Self, crate::error::SmxError> {
         let enumerator: Box<dyn HidEnumerator> = {
             let real = Box::new(HidapiEnumerator::new()?);
             match std::env::var("SMX_CAPTURE_DIR") {
@@ -86,19 +89,28 @@ impl SmxManager {
     /// Creates a new manager with a custom enumerator and starts background threads.
     pub fn new(
         enumerator: Box<dyn HidEnumerator>,
-        callback: impl Fn(SmxEvent) + Send + 'static,
+        callback: impl Fn(SmxEvent) + Send + Sync + 'static,
     ) -> Self {
+        let callback: Arc<dyn Fn(SmxEvent) + Send + Sync> = Arc::new(callback);
+
+        let mut devices = [SmxDevice::new(0), SmxDevice::new(1)];
+        for i in 0..2 {
+            let cb = Arc::clone(&callback);
+            devices[i].set_update_callback(Box::new(move |event| cb(event)));
+        }
+
         let state = ManagerState {
-            devices: [SmxDevice::new(0), SmxDevice::new(1)],
+            devices,
             poll_handles: [None, None],
             enumerator,
-            callback: Box::new(callback),
+            callback: Arc::clone(&callback),
             last_enumeration: None,
             panel_test_mode: PanelTestMode::Off,
             last_sent_panel_test_mode: PanelTestMode::Off,
             last_panel_test_sent_at: None,
             pending_lights: Vec::new(),
             delay_lights_until: None,
+            last_input_state: [0; 2],
         };
 
         let shared = Arc::new(ManagerShared {
@@ -364,6 +376,17 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
                 }
             }
 
+            // Detect input state changes.
+            for i in 0..2 {
+                if state.devices[i].is_connected() {
+                    let new_state = state.devices[i].input_state();
+                    if new_state != state.last_input_state[i] {
+                        state.last_input_state[i] = new_state;
+                        (state.callback)(SmxEvent::InputState { pad: i, state: new_state });
+                    }
+                }
+            }
+
             update_panel_test_mode(&mut state);
             send_pending_lights(&mut state);
 
@@ -433,13 +456,7 @@ fn attempt_connections(state: &mut ManagerState) {
         };
 
         // Create the split connection.
-        let cb = {
-            // Input state callbacks will be wired up via the shared state's atomic.
-            // The PollHandle fires the callback directly when input changes.
-            None::<Box<dyn Fn() + Send>>
-        };
-
-        match connection::open_connection(dev_info.path, device, cb) {
+        match connection::open_connection(dev_info.path, device, None) {
             Ok((poll_handle, cmd_handle)) => {
                 state.devices[slot_idx].set_connection(cmd_handle);
                 state.poll_handles[slot_idx] = Some(poll_handle);
