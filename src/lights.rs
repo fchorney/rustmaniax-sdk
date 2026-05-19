@@ -790,4 +790,37 @@ mod tests {
         }
         buf.into_inner()
     }
+
+    #[test]
+    fn animation_state_new_has_no_animations() {
+        let mut state = AnimationState::new();
+        // build_frame should produce all zeros when no animation loaded.
+        let frame = state.build_frame([0, 0]);
+        assert_eq!(frame.len(), 1350);
+        assert!(frame.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn animation_double_load_replaces() {
+        let gif1 = create_test_gif_simple(23, 24);
+        let gif2 = create_test_gif(14, 15);
+        let mut state = AnimationState::new();
+        state.load(&gif1, 0, LightsType::Released).unwrap();
+        state.load(&gif2, 0, LightsType::Released).unwrap();
+        // Should not panic, second load replaces first.
+        let frame = state.build_frame([0, 0]);
+        assert_eq!(frame.len(), 1350);
+    }
+
+    #[test]
+    fn upload_rejects_empty_data() {
+        let result = prepare_upload(&[], 0, LightsType::Released);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn upload_rejects_corrupt_data() {
+        let result = prepare_upload(b"not a gif", 0, LightsType::Released);
+        assert!(result.is_err());
+    }
 }

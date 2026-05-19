@@ -220,3 +220,42 @@ fn panel_test_mode_with_no_devices_does_not_crash() {
     mgr.set_panel_test_mode(PanelTestMode::PressureTest);
     std::thread::sleep(std::time::Duration::from_millis(100));
 }
+
+#[test]
+fn pad_swap_input_state_routes_correctly() {
+    let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
+
+    let both_connected = wait_for(
+        || mgr.get_info(0).connected && mgr.get_info(1).connected,
+        2000,
+    );
+    assert!(both_connected);
+
+    // P1 device (slot 0) gets input state.
+    dev_p1.queue_input_state(0x0001);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(mgr.get_input_state(0), 0x0001);
+    assert_eq!(mgr.get_input_state(1), 0x0000);
+
+    // P2 device (slot 1) gets different input state.
+    dev_p2.queue_input_state(0x0100);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(mgr.get_input_state(0), 0x0001);
+    assert_eq!(mgr.get_input_state(1), 0x0100);
+}
+
+#[test]
+fn config_available_after_connection() {
+    let (mgr, _dev, _events) = make_manager_one_device(false, 5);
+    let connected = wait_for(|| mgr.get_info(0).connected, 2000);
+    assert!(connected);
+
+    let config = mgr.get_config(0);
+    assert!(config.is_some(), "Config should be available after connection");
+}
+
+#[test]
+fn get_config_returns_none_for_invalid_pad() {
+    let (mgr, _dev, _events) = make_manager_one_device(false, 5);
+    assert!(mgr.get_config(2).is_none());
+}

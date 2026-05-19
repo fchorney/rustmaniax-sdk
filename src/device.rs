@@ -771,6 +771,61 @@ mod tests {
         convert_to_old_config(&config, &mut old_data);
         assert!(old_data.len() >= 128);
     }
+
+    #[test]
+    fn get_config_returns_none_when_not_connected() {
+        let device = SmxDevice::new(0);
+        assert!(device.get_config().is_none());
+    }
+
+    #[test]
+    fn set_config_does_nothing_when_not_connected() {
+        let mut device = SmxDevice::new(0);
+        device.set_config(SmxConfig::zeroed()); // should not panic
+        assert!(device.get_config().is_none());
+    }
+
+    #[test]
+    fn get_config_returns_pending_after_set() {
+        let fake = crate::test_helpers::FakeDevice::new_auto(false, 5);
+        let (poll, cmd) = crate::connection::open_connection(
+            "/dev/test".to_string(),
+            Box::new(fake),
+            None,
+        ).unwrap();
+
+        let mut device = SmxDevice::new(0);
+        device.set_connection(cmd);
+
+        // Connect.
+        for _ in 0..20 {
+            device.update().unwrap();
+            poll.poll();
+            if device.is_connected() { break; }
+        }
+        assert!(device.is_connected());
+
+        // Set a modified config.
+        let mut cfg = device.get_config().unwrap();
+        cfg.auto_lights_timeout = 99;
+        device.set_config(cfg);
+
+        // get_config should return the pending (optimistic) value.
+        let readback = device.get_config().unwrap();
+        assert_eq!(readback.auto_lights_timeout, 99);
+    }
+
+    #[test]
+    fn factory_reset_does_nothing_when_not_connected() {
+        let mut device = SmxDevice::new(0);
+        device.factory_reset(); // should not panic
+    }
+
+    #[test]
+    fn force_recalibration_does_nothing_when_not_connected() {
+        let mut device = SmxDevice::new(0);
+        device.force_recalibration(); // should not panic
+    }
 }
 
 #[cfg(test)]

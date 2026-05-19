@@ -267,3 +267,91 @@ fn replay_panel_lights() {
         }
     }
 }
+
+#[test]
+fn replay_panel_animation() {
+    if !capture_path("panel_animation").exists() {
+        eprintln!("Skipping: capture/panel_animation not found");
+        return;
+    }
+
+    let (mgr, devices, _events) = make_replay_manager("panel_animation");
+    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
+    assert!(connected);
+
+    // Send lights frames (simulating animation playback).
+    let light_data = vec![128u8; 1350];
+    for _ in 0..30 {
+        mgr.set_lights(&light_data);
+        std::thread::sleep(std::time::Duration::from_millis(33));
+    }
+
+    mgr.reenable_auto_lights();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let all_writes: Vec<Vec<u8>> = devices.iter().flat_map(|d| d.get_actual_writes()).collect();
+    let lights_count = count_command(&all_writes, b'2') + count_command(&all_writes, b'3');
+    assert!(lights_count >= 30, "Expected >= 30 lights commands, got {lights_count}");
+    assert!(has_command_str(&all_writes, b"S 1\n"), "Expected 'S 1\\n' at end");
+}
+
+#[test]
+fn replay_animation_upload() {
+    if !capture_path("animation_upload").exists() {
+        eprintln!("Skipping: capture/animation_upload not found");
+        return;
+    }
+
+    let (mgr, devices, _events) = make_replay_manager("animation_upload");
+    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
+    assert!(connected);
+
+    let pad = if mgr.get_info(0).connected { 0 } else { 1 };
+
+    // Generate and send upload commands (same as hardware test).
+    let gif = generate_test_animation_gif();
+    let upload = rustmaniax_sdk::prepare_upload(&gif, pad, rustmaniax_sdk::LightsType::Released);
+    if let Ok(upload) = upload {
+        for cmd in &upload.commands {
+            match cmd {
+                rustmaniax_sdk::UploadCommand::Packet(data) => {
+                    mgr.send_command(pad, data, None);
+                }
+                rustmaniax_sdk::UploadCommand::Delay(ms) => {
+                    std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
+                }
+            }
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let all_writes: Vec<Vec<u8>> = devices.iter().flat_map(|d| d.get_actual_writes()).collect();
+    let upload_count = count_command(&all_writes, b'm');
+    assert!(upload_count > 0, "Expected 'm' upload commands, got 0");
+}
+
+fn generate_test_animation_gif() -> Vec<u8> {
+    use image::codecs::gif::GifEncoder;
+    use image::{Frame, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    let colors: [(u8, u8, u8); 3] = [(255, 0, 0), (0, 255, 0), (0, 0, 255)];
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut encoder = GifEncoder::new(&mut buf);
+        let frames: Vec<Frame> = colors
+            .iter()
+            .map(|&(r, g, b)| {
+                let mut img = RgbaImage::new(23, 24);
+                for y in 0..24 {
+                    for x in 0..23 {
+                        img.put_pixel(x, y, Rgba([r, g, b, 255]));
+                    }
+                }
+                Frame::new(img)
+            })
+            .collect();
+        encoder.encode_frames(frames.into_iter()).unwrap();
+    }
+    buf.into_inner()
+}
