@@ -40,6 +40,8 @@ struct ManagerShared {
     wake: Condvar,
     // Protected state.
     state: Mutex<ManagerState>,
+    // Enumerator has its own lock so enumeration doesn't block USB polling.
+    enumerator: Mutex<Box<dyn HidEnumerator>>,
     // Polling rate config (atomics for lock-free access from threads).
     main_thread_sleep_ms: AtomicI32,
     usb_polling_sleep_us: AtomicI32,
@@ -48,7 +50,6 @@ struct ManagerShared {
 struct ManagerState {
     devices: [SmxDevice; 2],
     poll_handles: [Option<PollHandle>; 2],
-    enumerator: Box<dyn HidEnumerator>,
     callback: Arc<dyn Fn(SmxEvent) + Send + Sync>,
     last_enumeration: Option<Instant>,
 
@@ -98,15 +99,14 @@ impl SmxManager {
         let callback: Arc<dyn Fn(SmxEvent) + Send + Sync> = Arc::new(callback);
 
         let mut devices = [SmxDevice::new(0), SmxDevice::new(1)];
-        for i in 0..2 {
+        for device in &mut devices {
             let cb = Arc::clone(&callback);
-            devices[i].set_update_callback(Box::new(move |event| cb(event)));
+            device.set_update_callback(Box::new(move |event| cb(event)));
         }
 
         let state = ManagerState {
             devices,
             poll_handles: [None, None],
-            enumerator,
             callback: Arc::clone(&callback),
             last_enumeration: None,
             panel_test_mode: PanelTestMode::Off,
@@ -123,6 +123,7 @@ impl SmxManager {
             shutdown: AtomicBool::new(false),
             wake: Condvar::new(),
             state: Mutex::new(state),
+            enumerator: Mutex::new(enumerator),
             main_thread_sleep_ms: AtomicI32::new(50),
             usb_polling_sleep_us: AtomicI32::new(1000),
         });
@@ -328,16 +329,16 @@ fn usb_polling_loop(shared: Arc<ManagerShared>) {
         {
             let state = shared.state.lock().unwrap();
             for (i, poll_handle) in state.poll_handles.iter().enumerate() {
-                if let Some(ph) = poll_handle {
-                    if ph.poll() {
-                        should_wake = true;
-                    }
+                if let Some(ph) = poll_handle
+                    && ph.poll()
+                {
+                    should_wake = true;
                 }
                 // Also wake if a device has a read error (for prompt disconnect).
-                if let Some(conn) = state.devices[i].connection() {
-                    if conn.has_read_error() {
-                        should_wake = true;
-                    }
+                if let Some(conn) = state.devices[i].connection()
+                    && conn.has_read_error()
+                {
+                    should_wake = true;
                 }
             }
         }
@@ -351,10 +352,11 @@ fn usb_polling_loop(shared: Arc<ManagerShared>) {
 
 fn main_thread_loop(shared: Arc<ManagerShared>) {
     while !shared.shutdown.load(Ordering::Relaxed) {
+        // Attempt connections (releases state lock during enumeration).
+        attempt_connections(&shared);
+
         let wait_ms = {
             let mut state = shared.state.lock().unwrap();
-
-            attempt_connections(&mut state);
 
             let was_connected = [state.devices[0].is_connected(), state.devices[1].is_connected()];
 
@@ -425,24 +427,33 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
 
 // ─── Device Discovery ────────────────────────────────────────────────────────
 
-fn attempt_connections(state: &mut ManagerState) {
-    // Skip if both slots occupied.
-    let has_slot = state.devices[0].connection().is_none()
-        || state.devices[1].connection().is_none();
-    if !has_slot {
-        return;
-    }
-
-    // Rate limit enumeration.
-    let now = Instant::now();
-    if let Some(last) = state.last_enumeration
-        && now.duration_since(last).as_secs_f64() < ENUMERATION_INTERVAL_SECONDS
+fn attempt_connections(shared: &ManagerShared) {
+    // Check if we should enumerate (rate limit + slot availability).
     {
-        return;
+        let state = shared.state.lock().unwrap();
+        let has_slot = state.devices[0].connection().is_none()
+            || state.devices[1].connection().is_none();
+        if !has_slot {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(last) = state.last_enumeration
+            && now.duration_since(last).as_secs_f64() < ENUMERATION_INTERVAL_SECONDS
+        {
+            return;
+        }
     }
-    state.last_enumeration = Some(now);
+    // State lock is released here — USB polling thread can run during enumeration.
 
-    let devs = state.enumerator.enumerate(SMX_USB_VENDOR_ID, SMX_USB_PRODUCT_ID);
+    // Enumerate (potentially slow syscall, no lock held).
+    let devs = {
+        let enumerator = shared.enumerator.lock().unwrap();
+        enumerator.enumerate(SMX_USB_VENDOR_ID, SMX_USB_PRODUCT_ID)
+    };
+
+    // Re-acquire state lock for connection setup.
+    let mut state = shared.state.lock().unwrap();
+    state.last_enumeration = Some(Instant::now());
 
     // Clear failed paths that are no longer in the enumeration (device was unplugged).
     state.failed_paths.retain(|p| devs.iter().any(|d| d.path == *p));
@@ -452,17 +463,14 @@ fn attempt_connections(state: &mut ManagerState) {
             continue;
         }
 
-        // Only connect to StepManiaX devices.
         if !dev_info.product.contains("StepManiaX") {
             continue;
         }
 
-        // Skip paths that previously failed to open.
         if state.failed_paths.contains(&dev_info.path) {
             continue;
         }
 
-        // Skip if already open.
         let already_open = state.devices.iter().any(|d| {
             d.connection().is_some_and(|c| c.path() == dev_info.path)
         });
@@ -470,23 +478,24 @@ fn attempt_connections(state: &mut ManagerState) {
             continue;
         }
 
-        // Find empty slot.
         let slot = state.devices.iter().position(|d| d.connection().is_none());
         let Some(slot_idx) = slot else {
             break;
         };
 
         log::info!("Opening SMX device: {}", dev_info.path);
-        let device = match state.enumerator.open(&dev_info.path) {
-            Ok(d) => d,
-            Err(e) => {
-                log::error!("Error opening device {}: {e}", dev_info.path);
-                state.failed_paths.push(dev_info.path.clone());
-                continue;
+        let device = {
+            let enumerator = shared.enumerator.lock().unwrap();
+            match enumerator.open(&dev_info.path) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("Error opening device {}: {e}", dev_info.path);
+                    state.failed_paths.push(dev_info.path.clone());
+                    continue;
+                }
             }
         };
 
-        // Create the split connection.
         let input_cb = {
             let callback = Arc::clone(&state.callback);
             let pad_index = state.devices[slot_idx].pad_index_shared();

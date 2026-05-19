@@ -76,7 +76,7 @@ fn connected_pads() -> Vec<usize> {
 #[test]
 #[ignore]
 fn hardware_connection() {
-    let (mgr, events) = get_manager();
+    let (mgr, _events) = get_manager();
     let pads = connected_pads();
     assert!(!pads.is_empty(), "No SMX device detected. Is a pad connected?");
 
