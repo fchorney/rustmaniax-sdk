@@ -6,5 +6,4 @@ use crate::connection::SmxDeviceInfo;
 pub struct SmxDevice {
     pub info: SmxDeviceInfo,
     pub config: Option<SmxConfig>,
-    pub input_state: u16,
 }
