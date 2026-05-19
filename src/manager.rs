@@ -376,13 +376,14 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
                 }
             }
 
-            // Detect input state changes.
+            // Detect input state changes (fired from USB thread via callback,
+            // but also check here for devices that connected without the callback wired).
             for i in 0..2 {
                 if state.devices[i].is_connected() {
                     let new_state = state.devices[i].input_state();
                     if new_state != state.last_input_state[i] {
                         state.last_input_state[i] = new_state;
-                        (state.callback)(SmxEvent::InputState { pad: i, state: new_state });
+                        // Already fired by PollHandle callback, skip duplicate.
                     }
                 }
             }
@@ -456,7 +457,15 @@ fn attempt_connections(state: &mut ManagerState) {
         };
 
         // Create the split connection.
-        match connection::open_connection(dev_info.path, device, None) {
+        let input_cb = {
+            let callback = Arc::clone(&state.callback);
+            let pad = slot_idx;
+            Some(Box::new(move |new_state: u16| {
+                (callback)(SmxEvent::InputState { pad, state: new_state });
+            }) as Box<dyn Fn(u16) + Send>)
+        };
+
+        match connection::open_connection(dev_info.path, device, input_cb) {
             Ok((poll_handle, cmd_handle)) => {
                 state.devices[slot_idx].set_connection(cmd_handle);
                 state.poll_handles[slot_idx] = Some(poll_handle);

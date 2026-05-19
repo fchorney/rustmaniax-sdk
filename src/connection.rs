@@ -162,7 +162,7 @@ impl SharedState {
 pub struct PollHandle {
     device: Box<dyn HidDevice>,
     shared: Arc<SharedState>,
-    input_callback: Option<Box<dyn Fn() + Send>>,
+    input_callback: Option<Box<dyn Fn(u16) + Send>>,
 }
 
 impl PollHandle {
@@ -204,7 +204,7 @@ impl PollHandle {
                         || self.shared.always_fire_input.load(Ordering::Relaxed))
                         && self.input_callback.is_some()
                     {
-                        (self.input_callback.as_ref().unwrap())();
+                        (self.input_callback.as_ref().unwrap())(new_state);
                     }
                 }
                 HID_REPORT_DATA => {
@@ -511,7 +511,7 @@ impl CommandHandle {
 pub fn open_connection(
     path: String,
     device: Box<dyn HidDevice>,
-    input_callback: Option<Box<dyn Fn() + Send>>,
+    input_callback: Option<Box<dyn Fn(u16) + Send>>,
 ) -> Result<(PollHandle, CommandHandle), SmxError> {
     // We need two device handles — one for each thread.
     // However, hidapi doesn't support cloning a device handle.
@@ -587,7 +587,7 @@ mod tests {
 
     fn open_fake_with_callback(
         device: FakeDevice,
-        cb: Box<dyn Fn() + Send>,
+        cb: Box<dyn Fn(u16) + Send>,
     ) -> (PollHandle, CommandHandle) {
         open_connection("/dev/fake".to_string(), Box::new(device.clone()), Some(cb)).unwrap()
     }
@@ -620,7 +620,7 @@ mod tests {
 
         let (poll, _cmd) = open_fake_with_callback(
             dev,
-            Box::new(move || { count_clone.fetch_add(1, Ordering::Relaxed); }),
+            Box::new(move |_| { count_clone.fetch_add(1, Ordering::Relaxed); }),
         );
         poll.poll();
         // Only fires once for the change from 0 to 0x0001, not for duplicate.
@@ -637,7 +637,7 @@ mod tests {
 
         let (poll, cmd) = open_fake_with_callback(
             dev,
-            Box::new(move || { count_clone.fetch_add(1, Ordering::Relaxed); }),
+            Box::new(move |_| { count_clone.fetch_add(1, Ordering::Relaxed); }),
         );
         cmd.set_always_fire_input(true);
         poll.poll();
