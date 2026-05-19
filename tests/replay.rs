@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use rustmaniax_sdk::UpdateReason;
+use rustmaniax_sdk::SmxEvent;
 use rustmaniax_sdk::SmxManager;
 use rustmaniax_sdk::HID_REPORT_COMMAND;
 use rustmaniax_sdk::test_helpers::{wait_for, ReplayDevice};
@@ -20,7 +20,7 @@ fn capture_path(name: &str) -> std::path::PathBuf {
 
 fn make_replay_manager(
     capture_name: &str,
-) -> (SmxManager, Vec<ReplayDevice>, Arc<Mutex<Vec<(usize, UpdateReason)>>>) {
+) -> (SmxManager, Vec<ReplayDevice>, Arc<Mutex<Vec<SmxEvent>>>) {
     let dir = capture_path(capture_name);
 
     // Load devices — these are shared between the enumerator and test assertions.
@@ -39,8 +39,8 @@ fn make_replay_manager(
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_clone = Arc::clone(&events);
 
-    let mgr = SmxManager::new(Box::new(enumerator), move |pad, reason| {
-        events_clone.lock().unwrap().push((pad, reason));
+    let mgr = SmxManager::new(Box::new(enumerator), move |event| {
+        events_clone.lock().unwrap().push(event);
     });
 
     (mgr, devices, events)
@@ -88,7 +88,7 @@ fn replay_connection() {
     // Should have fired Connected callback.
     let evts = events.lock().unwrap();
     assert!(
-        evts.iter().any(|(_, r)| *r == UpdateReason::Connected),
+        evts.iter().any(|e| matches!(e, SmxEvent::Connected { .. })),
         "No Connected callback"
     );
 

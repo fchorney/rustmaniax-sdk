@@ -30,6 +30,17 @@ pub enum UpdateReason {
     SensorTestData,
 }
 
+/// Event emitted by the SDK with all relevant data attached.
+/// The callback receives this directly — no need to call back into the manager.
+#[derive(Clone, Debug)]
+pub enum SmxEvent {
+    Connected { pad: usize, info: SmxInfo },
+    Disconnected { pad: usize },
+    InputState { pad: usize, state: u16 },
+    ConfigUpdated { pad: usize },
+    SensorTestData { pad: usize, data: SensorTestData },
+}
+
 /// Public device info (equivalent to C++ SMXInfo).
 #[derive(Clone, Debug, Default)]
 pub struct SmxInfo {
@@ -53,7 +64,7 @@ pub struct SensorTestData {
 /// High-level per-controller state and logic.
 pub struct SmxDevice {
     pad_index: usize,
-    update_callback: Option<Box<dyn Fn(usize, UpdateReason) + Send>>,
+    update_callback: Option<Box<dyn Fn(SmxEvent) + Send>>,
     connection: Option<CommandHandle>,
 
     // Config state.
@@ -92,7 +103,7 @@ impl SmxDevice {
         }
     }
 
-    pub fn set_update_callback(&mut self, cb: Box<dyn Fn(usize, UpdateReason) + Send>) {
+    pub fn set_update_callback(&mut self, cb: Box<dyn Fn(SmxEvent) + Send>) {
         self.update_callback = Some(cb);
     }
 
@@ -222,7 +233,24 @@ impl SmxDevice {
 
     fn call_update(&self, reason: UpdateReason) {
         if let Some(cb) = &self.update_callback {
-            cb(self.pad_index, reason);
+            let event = match reason {
+                UpdateReason::Connected => SmxEvent::Connected {
+                    pad: self.pad_index,
+                    info: self.get_info(),
+                },
+                UpdateReason::Disconnected => SmxEvent::Disconnected { pad: self.pad_index },
+                UpdateReason::ConfigUpdated => SmxEvent::ConfigUpdated { pad: self.pad_index },
+                UpdateReason::SensorTestData => SmxEvent::SensorTestData {
+                    pad: self.pad_index,
+                    data: self.sensor_test_data.clone(),
+                },
+                UpdateReason::InputState => SmxEvent::InputState {
+                    pad: self.pad_index,
+                    state: self.input_state(),
+                },
+                UpdateReason::Updated => return,
+            };
+            cb(event);
         }
     }
 

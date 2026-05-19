@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::connection::{self, HidEnumerator, HidapiEnumerator, PollHandle};
-use crate::device::{SmxDevice, SmxInfo, UpdateReason};
+use crate::device::{SmxDevice, SmxEvent, SmxInfo};
 use crate::protocol::{
     BYTES_PER_PAD_16, BYTES_PER_PAD_25, ENUMERATION_INTERVAL_SECONDS, LED_COLOR_SCALE,
     LEGACY_LIGHTS_PAYLOAD_SIZE, LIGHTS_FRAME_INTERVAL, LIGHTS_LEGACY_COMMAND_DELAY, NUM_PANELS,
@@ -49,7 +49,7 @@ struct ManagerState {
     devices: [SmxDevice; 2],
     poll_handles: [Option<PollHandle>; 2],
     enumerator: Box<dyn HidEnumerator>,
-    callback: Box<dyn Fn(usize, UpdateReason) + Send>,
+    callback: Box<dyn Fn(SmxEvent) + Send>,
     last_enumeration: Option<Instant>,
 
     // Panel test mode.
@@ -66,7 +66,7 @@ impl SmxManager {
     /// Creates a manager using the real hidapi enumerator.
     /// If `SMX_CAPTURE_DIR` is set, wraps it with a recording layer that writes
     /// `.smxhid` files directly into that directory (overwriting previous captures).
-    pub fn start(callback: impl Fn(usize, UpdateReason) + Send + 'static) -> Result<Self, crate::error::SmxError> {
+    pub fn start(callback: impl Fn(SmxEvent) + Send + 'static) -> Result<Self, crate::error::SmxError> {
         let enumerator: Box<dyn HidEnumerator> = {
             let real = Box::new(HidapiEnumerator::new()?);
             match std::env::var("SMX_CAPTURE_DIR") {
@@ -86,7 +86,7 @@ impl SmxManager {
     /// Creates a new manager with a custom enumerator and starts background threads.
     pub fn new(
         enumerator: Box<dyn HidEnumerator>,
-        callback: impl Fn(usize, UpdateReason) + Send + 'static,
+        callback: impl Fn(SmxEvent) + Send + 'static,
     ) -> Self {
         let state = ManagerState {
             devices: [SmxDevice::new(0), SmxDevice::new(1)],
@@ -359,7 +359,8 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
 
             for (i, &connected) in just_connected.iter().enumerate() {
                 if connected {
-                    (state.callback)(i, UpdateReason::Connected);
+                    let info = state.devices[i].get_info();
+                    (state.callback)(SmxEvent::Connected { pad: i, info });
                 }
             }
 

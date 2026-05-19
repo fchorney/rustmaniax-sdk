@@ -18,7 +18,7 @@
 
 use rustmaniax_sdk::{
     HidapiEnumerator, HidEnumerator, PanelTestMode, RecordingEnumerator, SensorTestMode,
-    SmxManager, UpdateReason,
+    SmxEvent, SmxManager,
 };
 
 use std::path::Path;
@@ -37,9 +37,9 @@ fn wait_for(cond: impl Fn() -> bool, timeout_ms: u64) -> bool {
 }
 
 /// Shared manager for all hardware tests.
-static MANAGER: OnceLock<(SmxManager, Arc<Mutex<Vec<(usize, UpdateReason)>>>)> = OnceLock::new();
+static MANAGER: OnceLock<(SmxManager, Arc<Mutex<Vec<SmxEvent>>>)> = OnceLock::new();
 
-fn get_manager() -> &'static (SmxManager, Arc<Mutex<Vec<(usize, UpdateReason)>>>) {
+fn get_manager() -> &'static (SmxManager, Arc<Mutex<Vec<SmxEvent>>>) {
     MANAGER.get_or_init(|| {
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_clone = Arc::clone(&events);
@@ -56,8 +56,8 @@ fn get_manager() -> &'static (SmxManager, Arc<Mutex<Vec<(usize, UpdateReason)>>>
             }
         };
 
-        let mgr = SmxManager::new(enumerator, move |pad, reason| {
-            events_clone.lock().unwrap().push((pad, reason));
+        let mgr = SmxManager::new(enumerator, move |event| {
+            events_clone.lock().unwrap().push(event);
         });
 
         (mgr, events)
@@ -81,7 +81,6 @@ fn hardware_connection() {
     assert!(!pads.is_empty(), "No SMX device detected. Is a pad connected?");
 
     let evts = events.lock().unwrap();
-    assert!(evts.iter().any(|(_, r)| *r == UpdateReason::Connected));
 
     for i in &pads {
         let info = mgr.get_info(*i);

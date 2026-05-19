@@ -11,6 +11,8 @@ log = "0.4.29"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 bitflags = "2.11.1"
 image = { version = "0.25.10", default-features = false, features = ["gif"] }
+ctrlc = "3.4.5"
+env_logger = "0.11.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hidapi = { version = "2.6.5", default-features = false, features = ["linux-static-hidraw"] }
@@ -18,8 +20,9 @@ hidapi = { version = "2.6.5", default-features = false, features = ["linux-stati
 [target.'cfg(target_os = "windows")'.dependencies]
 hidapi = { version = "2.6.5", default-features = false, features = ["windows-native"] }
 
-[dev-dependencies]
-env_logger = "0.11.10"
+[[bin]]
+name = "smx-sample"
+path = "src/bin/sample.rs"
 
 [lints.clippy]
 perf = { level = "warn", priority = -1 }

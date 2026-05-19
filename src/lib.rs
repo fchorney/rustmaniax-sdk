@@ -2,11 +2,11 @@
 //!
 //! # Quick Start
 //! ```no_run
-//! use rustmaniax_sdk::{SmxManager, UpdateReason};
+//! use rustmaniax_sdk::{SmxManager, SmxEvent};
 //!
-//! let mgr = SmxManager::start(|pad, reason| {
-//!     if reason == UpdateReason::Connected {
-//!         println!("Pad {pad} connected!");
+//! let mgr = SmxManager::start(|event| {
+//!     if let SmxEvent::Connected { pad, info } = &event {
+//!         println!("Pad {pad} connected! fw={}", info.firmware_version);
 //!     }
 //! }).unwrap();
 //!
@@ -35,7 +35,7 @@ pub mod test_helpers;
 
 // Core types.
 pub use config::{ConfigFlags, PackedSensorSettings, SmxConfig};
-pub use device::{SensorTestData, SensorTestMode, SmxInfo, UpdateReason};
+pub use device::{SensorTestData, SensorTestMode, SmxEvent, SmxInfo, UpdateReason};
 pub use error::SmxError;
 pub use manager::{PanelTestMode, SmxManager};
 

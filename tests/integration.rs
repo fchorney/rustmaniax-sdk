@@ -1,7 +1,6 @@
 //! Full-stack integration tests exercising SmxManager with fake HID devices.
 
-use rustmaniax_sdk::UpdateReason;
-use rustmaniax_sdk::{PanelTestMode, SmxManager};
+use rustmaniax_sdk::{PanelTestMode, SmxEvent, SmxManager};
 use rustmaniax_sdk::HID_REPORT_COMMAND;
 use rustmaniax_sdk::test_helpers::{wait_for, FakeDevice, FakeEnumerator};
 
@@ -10,21 +9,21 @@ use std::sync::{Arc, Mutex};
 fn make_manager_one_device(
     is_p2: bool,
     firmware: u16,
-) -> (SmxManager, FakeDevice, Arc<Mutex<Vec<(usize, UpdateReason)>>>) {
+) -> (SmxManager, FakeDevice, Arc<Mutex<Vec<SmxEvent>>>) {
     let dev = FakeDevice::new_auto(is_p2, firmware);
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_clone = Arc::clone(&events);
 
     let enumerator = FakeEnumerator::new(vec![("/dev/smx0".to_string(), dev.clone())]);
-    let mgr = SmxManager::new(Box::new(enumerator), move |pad, reason| {
-        events_clone.lock().unwrap().push((pad, reason));
+    let mgr = SmxManager::new(Box::new(enumerator), move |event| {
+        events_clone.lock().unwrap().push(event);
     });
 
     (mgr, dev, events)
 }
 
 fn make_manager_two_devices(
-) -> (SmxManager, FakeDevice, FakeDevice, Arc<Mutex<Vec<(usize, UpdateReason)>>>) {
+) -> (SmxManager, FakeDevice, FakeDevice, Arc<Mutex<Vec<SmxEvent>>>) {
     let dev_p1 = FakeDevice::new_auto(false, 5);
     let dev_p2 = FakeDevice::new_auto(true, 5);
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -34,8 +33,8 @@ fn make_manager_two_devices(
         ("/dev/smx0".to_string(), dev_p1.clone()),
         ("/dev/smx1".to_string(), dev_p2.clone()),
     ]);
-    let mgr = SmxManager::new(Box::new(enumerator), move |pad, reason| {
-        events_clone.lock().unwrap().push((pad, reason));
+    let mgr = SmxManager::new(Box::new(enumerator), move |event| {
+        events_clone.lock().unwrap().push(event);
     });
 
     (mgr, dev_p1, dev_p2, events)
@@ -56,7 +55,7 @@ fn single_p1_device_discovered_and_connected() {
 
     // Should have received a Connected callback for pad 0.
     let evts = events.lock().unwrap();
-    assert!(evts.iter().any(|(pad, reason)| *pad == 0 && *reason == UpdateReason::Connected));
+    assert!(evts.iter().any(|e| matches!(e, SmxEvent::Connected { pad: 0, .. })));
 }
 
 #[test]
@@ -209,14 +208,14 @@ fn force_recalibration_on_disconnected_pad_does_not_crash() {
 #[test]
 fn reenable_auto_lights_with_no_devices_does_not_crash() {
     let enumerator = FakeEnumerator::new(vec![]);
-    let mgr = SmxManager::new(Box::new(enumerator), |_, _| {});
+    let mgr = SmxManager::new(Box::new(enumerator), |_| {});
     mgr.reenable_auto_lights();
 }
 
 #[test]
 fn panel_test_mode_with_no_devices_does_not_crash() {
     let enumerator = FakeEnumerator::new(vec![]);
-    let mgr = SmxManager::new(Box::new(enumerator), |_, _| {});
+    let mgr = SmxManager::new(Box::new(enumerator), |_| {});
     mgr.set_panel_test_mode(PanelTestMode::PressureTest);
     std::thread::sleep(std::time::Duration::from_millis(100));
 }
