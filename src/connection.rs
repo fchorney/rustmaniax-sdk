@@ -52,14 +52,21 @@ impl HidDevice for HidapiDevice {
 
 /// HID enumerator backed by the `hidapi` crate.
 pub struct HidapiEnumerator {
-    api: hidapi::HidApi,
+    api: std::sync::Arc<hidapi::HidApi>,
 }
 
 impl HidapiEnumerator {
+    /// Creates a new enumerator with its own `HidApi` instance.
     pub fn new() -> Result<Self, SmxError> {
         Ok(Self {
-            api: hidapi::HidApi::new()?,
+            api: std::sync::Arc::new(hidapi::HidApi::new()?),
         })
+    }
+
+    /// Creates an enumerator sharing an existing `HidApi` instance.
+    /// Use this when the host application (e.g., deadsync) already owns a `HidApi`.
+    pub fn from_shared(api: std::sync::Arc<hidapi::HidApi>) -> Self {
+        Self { api }
     }
 }
 

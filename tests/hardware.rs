@@ -12,8 +12,7 @@ use rustmaniax_sdk::{
 };
 
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 fn wait_for(cond: impl Fn() -> bool, timeout_ms: u64) -> bool {
@@ -27,42 +26,42 @@ fn wait_for(cond: impl Fn() -> bool, timeout_ms: u64) -> bool {
     true
 }
 
-fn capture_dir() -> Option<String> {
-    std::env::var("SMX_CAPTURE_DIR").ok().filter(|s| !s.is_empty())
-}
+/// Shared manager for all hardware tests. On macOS, hidapi can only be
+/// initialized once per process, so we share a single instance.
+static MANAGER: OnceLock<(SmxManager, Arc<Mutex<Vec<(usize, UpdateReason)>>>)> = OnceLock::new();
 
-fn start_with_recording(
-    sub_dir: &str,
-) -> (SmxManager, Arc<AtomicI32>, Arc<Mutex<Vec<(usize, UpdateReason)>>>) {
-    let enumerator: Box<dyn HidEnumerator> = {
-        let real = Box::new(HidapiEnumerator::new().expect("Failed to init HID"));
-        match capture_dir() {
-            Some(dir) => {
-                let path = Path::new(&dir).join(sub_dir);
-                Box::new(RecordingEnumerator::new(real, &path, false))
+fn get_manager() -> &'static (SmxManager, Arc<Mutex<Vec<(usize, UpdateReason)>>>) {
+    MANAGER.get_or_init(|| {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let enumerator: Box<dyn HidEnumerator> = {
+            let real = Box::new(HidapiEnumerator::new().expect("Failed to init HID"));
+            match std::env::var("SMX_CAPTURE_DIR").ok().filter(|s| !s.is_empty()) {
+                Some(dir) => Box::new(RecordingEnumerator::new(
+                    real,
+                    Path::new(&dir),
+                    false,
+                )),
+                None => real,
             }
-            None => real,
-        }
-    };
+        };
 
-    let connected = Arc::new(AtomicI32::new(0));
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let conn_clone = Arc::clone(&connected);
-    let events_clone = Arc::clone(&events);
+        let mgr = SmxManager::new(enumerator, move |pad, reason| {
+            events_clone.lock().unwrap().push((pad, reason));
+        });
 
-    let mgr = SmxManager::new(enumerator, move |pad, reason| {
-        if reason == UpdateReason::Connected {
-            conn_clone.fetch_add(1, Ordering::Relaxed);
-        }
-        events_clone.lock().unwrap().push((pad, reason));
-    });
-
-    (mgr, connected, events)
+        (mgr, events)
+    })
 }
 
-fn detect_hardware() -> usize {
-    let e = HidapiEnumerator::new().expect("Failed to init HID");
-    e.enumerate(0x2341, 0x8037).len()
+fn ensure_connected() -> Option<usize> {
+    let (mgr, _) = get_manager();
+    let ok = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 5000);
+    if !ok {
+        return None;
+    }
+    Some(if mgr.get_info(0).connected { 0 } else { 1 })
 }
 
 // ─── Tests (one per capture scenario) ────────────────────────────────────────
@@ -70,15 +69,12 @@ fn detect_hardware() -> usize {
 #[test]
 #[ignore]
 fn hardware_connection() {
-    let count = detect_hardware();
-    if count == 0 {
-        println!("No SMX hardware detected, skipping");
-        return;
-    }
+    let (mgr, events) = get_manager();
+    let pad = ensure_connected();
+    assert!(pad.is_some(), "No SMX device detected. Is a pad connected?");
 
-    let (mgr, connected, _events) = start_with_recording("connection");
-    let ok = wait_for(|| connected.load(Ordering::Relaxed) >= count as i32, 5000);
-    assert!(ok, "Not all devices connected");
+    let evts = events.lock().unwrap();
+    assert!(evts.iter().any(|(_, r)| *r == UpdateReason::Connected));
 
     for i in 0..2 {
         let info = mgr.get_info(i);
@@ -95,39 +91,26 @@ fn hardware_connection() {
 #[test]
 #[ignore]
 fn hardware_force_recalibration() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
+    let (mgr, _) = get_manager();
+    let pad = ensure_connected().expect("No SMX device detected.");
 
-    let (mgr, connected, _) = start_with_recording("force_recalibration");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= count as i32, 5000));
-
-    for i in 0..2 {
-        if mgr.get_info(i).connected {
-            mgr.force_recalibration(i);
-            println!("Sent force recalibration to pad {i}");
-        }
-    }
+    mgr.force_recalibration(pad);
+    println!("Sent force recalibration to pad {pad}");
     std::thread::sleep(Duration::from_millis(500));
-
-    for i in 0..2 {
-        if mgr.get_info(i).connected {
-            println!("Pad {i} still connected after recalibration");
-        }
-    }
+    assert!(mgr.get_info(pad).connected, "Pad disconnected after recalibration");
 }
 
 #[test]
 #[ignore]
 fn hardware_panel_test_mode() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
-
-    let (mgr, connected, _) = start_with_recording("panel_test_mode");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= count as i32, 5000));
+    let (mgr, _) = get_manager();
+    let pad = ensure_connected().expect("No SMX device detected.");
 
     mgr.set_panel_test_mode(PanelTestMode::PressureTest);
     println!("Enabled pressure test mode");
     std::thread::sleep(Duration::from_secs(2));
+
+    assert!(mgr.get_info(pad).connected);
 
     mgr.set_panel_test_mode(PanelTestMode::Off);
     println!("Disabled panel test mode");
@@ -137,11 +120,8 @@ fn hardware_panel_test_mode() {
 #[test]
 #[ignore]
 fn hardware_reenable_auto_lights() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
-
-    let (mgr, connected, _) = start_with_recording("reenable_auto_lights");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= count as i32, 5000));
+    let (mgr, _) = get_manager();
+    ensure_connected().expect("No SMX device detected.");
 
     mgr.reenable_auto_lights();
     println!("Sent re-enable auto lights");
@@ -151,32 +131,24 @@ fn hardware_reenable_auto_lights() {
 #[test]
 #[ignore]
 fn hardware_config_get_set() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
-
-    let (mgr, connected, _) = start_with_recording("config_get_set");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= 1, 5000));
-
-    let pad = if mgr.get_info(0).connected { 0 } else { 1 };
+    let (mgr, _) = get_manager();
+    let pad = ensure_connected().expect("No SMX device detected.");
 
     let original = mgr.get_config(pad).expect("Config not available");
     let orig_debounce = unsafe { std::ptr::addr_of!(original.panel_debounce_us).read_unaligned() };
     println!("Original panelDebounceMicroseconds: {orig_debounce}");
 
-    // Modify and write.
     let mut modified = original;
     let new_val: u16 = if orig_debounce == 4000 { 5000 } else { 4000 };
     unsafe { std::ptr::addr_of_mut!(modified.panel_debounce_us).write_unaligned(new_val) };
     mgr.set_config(pad, modified);
     std::thread::sleep(Duration::from_secs(2));
 
-    // Read back.
     let readback = mgr.get_config(pad).unwrap();
     let rb_debounce = unsafe { std::ptr::addr_of!(readback.panel_debounce_us).read_unaligned() };
     println!("Read back panelDebounceMicroseconds: {rb_debounce}");
     assert_eq!(rb_debounce, new_val);
 
-    // Restore original.
     mgr.set_config(pad, original);
     std::thread::sleep(Duration::from_secs(2));
 
@@ -189,39 +161,23 @@ fn hardware_config_get_set() {
 #[test]
 #[ignore]
 fn hardware_platform_lights() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
+    let (mgr, _) = get_manager();
+    let pad = ensure_connected().expect("No SMX device detected.");
 
-    let (mgr, connected, _) = start_with_recording("platform_lights");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= 1, 5000));
-
-    // Check firmware v4+.
-    let mut supported = false;
-    for i in 0..2 {
-        let info = mgr.get_info(i);
-        if info.connected && info.firmware_version >= 4 {
-            supported = true;
-        }
-    }
-    if !supported {
+    let info = mgr.get_info(pad);
+    if info.firmware_version < 4 {
         println!("No pad with firmware v4+, skipping platform lights");
         return;
     }
 
-    // Red.
     let mut data = vec![0u8; 264];
-    for i in 0..88 {
-        data[i * 3] = 255;
-    }
+    for i in 0..88 { data[i * 3] = 255; }
     mgr.set_platform_lights(&data);
     println!("Set platform lights to RED");
     std::thread::sleep(Duration::from_secs(2));
 
-    // Blue.
     data.fill(0);
-    for i in 0..88 {
-        data[i * 3 + 2] = 255;
-    }
+    for i in 0..88 { data[i * 3 + 2] = 255; }
     mgr.set_platform_lights(&data);
     println!("Set platform lights to BLUE");
     std::thread::sleep(Duration::from_secs(2));
@@ -233,13 +189,8 @@ fn hardware_platform_lights() {
 #[test]
 #[ignore]
 fn hardware_sensor_test_mode() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
-
-    let (mgr, connected, _) = start_with_recording("sensor_test_mode");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= 1, 5000));
-
-    let pad = if mgr.get_info(0).connected { 0 } else { 1 };
+    let (mgr, _) = get_manager();
+    let pad = ensure_connected().expect("No SMX device detected.");
 
     let modes = [
         (SensorTestMode::UncalibratedValues, "Uncalibrated"),
@@ -267,11 +218,8 @@ fn hardware_sensor_test_mode() {
 #[test]
 #[ignore]
 fn hardware_panel_lights() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
-
-    let (mgr, connected, _) = start_with_recording("panel_lights");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= count as i32, 5000));
+    let (mgr, _) = get_manager();
+    ensure_connected().expect("No SMX device detected.");
 
     println!("Running 3-second rainbow sweep");
 
@@ -282,7 +230,7 @@ fn hardware_panel_lights() {
 
     while start.elapsed() < duration {
         let progress = start.elapsed().as_secs_f32() / duration.as_secs_f32();
-        let mut light_data = vec![0u8; 1350]; // 2 pads × 9 panels × 25 LEDs × 3 RGB
+        let mut light_data = vec![0u8; 1350];
 
         for pad in 0..2 {
             for panel in 0..9 {
@@ -313,17 +261,12 @@ fn hardware_panel_lights() {
 #[test]
 #[ignore]
 fn hardware_panel_animation() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
+    let (mgr, _) = get_manager();
+    ensure_connected().expect("No SMX device detected.");
 
-    let (mgr, connected, _) = start_with_recording("panel_animation");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= count as i32, 5000));
-
-    // Generate a simple 23x24 animated GIF (6 frames, color cycle).
     let gif = generate_test_animation_gif();
     println!("Generated {}-byte animated GIF", gif.len());
 
-    // Load animation for each connected pad.
     let mut anim_state = rustmaniax_sdk::AnimationState::new();
     for pad in 0..2 {
         if mgr.get_info(pad).connected {
@@ -334,7 +277,6 @@ fn hardware_panel_animation() {
         }
     }
 
-    // Play for 3 seconds.
     println!("Playing animation for 3 seconds...");
     let duration = Duration::from_secs(3);
     let start = std::time::Instant::now();
@@ -353,13 +295,9 @@ fn hardware_panel_animation() {
 #[test]
 #[ignore]
 fn hardware_animation_upload() {
-    let count = detect_hardware();
-    if count == 0 { println!("No SMX hardware, skipping"); return; }
+    let (mgr, _) = get_manager();
+    let pad = ensure_connected().expect("No SMX device detected.");
 
-    let (mgr, connected, _) = start_with_recording("animation_upload");
-    assert!(wait_for(|| connected.load(Ordering::Relaxed) >= 1, 5000));
-
-    let pad = if mgr.get_info(0).connected { 0 } else { 1 };
     let info = mgr.get_info(pad);
     if info.firmware_version < 4 {
         println!("Firmware v4+ required for upload, skipping (fw={})", info.firmware_version);
@@ -372,12 +310,9 @@ fn hardware_animation_upload() {
 
     println!("Prepared {} upload commands", upload.commands.len());
 
-    // Send upload commands.
     for cmd in &upload.commands {
         match cmd {
             rustmaniax_sdk::UploadCommand::Packet(data) => {
-                // Send via the manager's low-level command interface would go here.
-                // For now we just verify the upload was prepared correctly.
                 assert!(!data.is_empty());
             }
             rustmaniax_sdk::UploadCommand::Delay(ms) => {
@@ -385,7 +320,7 @@ fn hardware_animation_upload() {
             }
         }
     }
-    println!("Upload complete");
+    println!("Upload preparation verified");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
