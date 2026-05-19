@@ -102,6 +102,22 @@ fn hardware_force_recalibration() {
 
 #[test]
 #[ignore]
+fn hardware_zzz_factory_reset() {
+    let (mgr, _) = get_manager();
+    let pad = ensure_connected().expect("No SMX device detected.");
+
+    mgr.factory_reset(pad);
+    println!("Sent factory reset to pad {pad}");
+    std::thread::sleep(Duration::from_secs(2));
+
+    assert!(mgr.get_info(pad).connected, "Pad disconnected after factory reset");
+    let config = mgr.get_config(pad);
+    assert!(config.is_some(), "Config not available after factory reset");
+    println!("Pad {pad} still connected with config after factory reset");
+}
+
+#[test]
+#[ignore]
 fn hardware_panel_test_mode() {
     let (mgr, _) = get_manager();
     let pad = ensure_connected().expect("No SMX device detected.");
