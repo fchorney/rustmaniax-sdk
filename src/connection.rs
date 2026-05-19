@@ -561,3 +561,331 @@ impl HidDevice for SharedHidDevice {
 
 // SharedHidDevice contains Arc<Mutex<..>> which is Send, so this is safe.
 unsafe impl Send for SharedHidDevice {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{
+        HID_REPORT_COMMAND, PACKET_FLAG_END_OF_COMMAND, PACKET_FLAG_HOST_CMD_FINISHED,
+        PACKET_FLAG_START_OF_COMMAND, SERIAL_SIZE,
+    };
+    use crate::test_helpers::FakeDevice;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn open_fake(device: FakeDevice) -> (PollHandle, CommandHandle) {
+        open_connection(
+            "/dev/fake".to_string(),
+            Box::new(device.clone()),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn open_fake_with_callback(
+        device: FakeDevice,
+        cb: Box<dyn Fn() + Send>,
+    ) -> (PollHandle, CommandHandle) {
+        open_connection("/dev/fake".to_string(), Box::new(device.clone()), Some(cb)).unwrap()
+    }
+
+    #[test]
+    fn input_state_updated_from_report3() {
+        let dev = FakeDevice::new();
+        dev.queue_input_state(0x0010);
+        let (poll, cmd) = open_fake(dev);
+        poll.poll();
+        assert_eq!(cmd.input_state(), 0x0010);
+    }
+
+    #[test]
+    fn input_state_multiple_panels() {
+        let dev = FakeDevice::new();
+        dev.queue_input_state(0x0111);
+        let (poll, cmd) = open_fake(dev);
+        poll.poll();
+        assert_eq!(cmd.input_state(), 0x0111);
+    }
+
+    #[test]
+    fn input_callback_fires_on_change() {
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = Arc::clone(&count);
+        let dev = FakeDevice::new();
+        dev.queue_input_state(0x0001);
+        dev.queue_input_state(0x0001); // duplicate
+
+        let (poll, _cmd) = open_fake_with_callback(
+            dev,
+            Box::new(move || { count_clone.fetch_add(1, Ordering::Relaxed); }),
+        );
+        poll.poll();
+        // Only fires once for the change from 0 to 0x0001, not for duplicate.
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn input_callback_always_fire_mode() {
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = Arc::clone(&count);
+        let dev = FakeDevice::new();
+        dev.queue_input_state(0x0001);
+        dev.queue_input_state(0x0001); // duplicate
+
+        let (poll, cmd) = open_fake_with_callback(
+            dev,
+            Box::new(move || { count_clone.fetch_add(1, Ordering::Relaxed); }),
+        );
+        cmd.set_always_fire_input(true);
+        poll.poll();
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn poll_returns_false_when_no_data() {
+        let dev = FakeDevice::new();
+        let (poll, _cmd) = open_fake(dev.clone());
+        assert!(!poll.poll());
+        assert!(!dev.clone().read(&mut [0; 64]).is_err());
+    }
+
+    #[test]
+    fn read_error_propagates() {
+        let dev = FakeDevice::new();
+        let (poll, cmd) = open_fake(dev.clone());
+        dev.set_fail_reads(true);
+        poll.poll();
+        assert!(cmd.has_read_error());
+    }
+
+    #[test]
+    fn close_resets_state() {
+        let dev = FakeDevice::new();
+        dev.queue_input_state(0x00FF);
+        let (poll, mut cmd) = open_fake(dev);
+        poll.poll();
+        assert_eq!(cmd.input_state(), 0x00FF);
+        cmd.close();
+        // Input state is in shared atomic — still readable but device is closed.
+        assert!(!cmd.is_connected_with_info());
+    }
+
+    #[test]
+    fn report6_single_packet_queued() {
+        let dev = FakeDevice::new();
+        dev.queue_report6(
+            PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND,
+            b"AB",
+        );
+        let (poll, mut cmd) = open_fake(dev);
+        cmd.set_active(true);
+        poll.poll();
+        cmd.update().unwrap();
+        let pkt = cmd.read_packet().unwrap();
+        assert_eq!(pkt, b"AB");
+    }
+
+    #[test]
+    fn report6_multi_fragment_reassembly() {
+        let dev = FakeDevice::new();
+        dev.queue_report6(PACKET_FLAG_START_OF_COMMAND, b"Hello");
+        dev.queue_report6(PACKET_FLAG_END_OF_COMMAND, b" W");
+        let (poll, mut cmd) = open_fake(dev);
+        cmd.set_active(true);
+        poll.poll();
+        cmd.update().unwrap();
+        let pkt = cmd.read_packet().unwrap();
+        assert_eq!(pkt, b"Hello W");
+    }
+
+    #[test]
+    fn report6_start_clears_partial() {
+        let dev = FakeDevice::new();
+        // Partial packet (no END).
+        dev.queue_report6(PACKET_FLAG_START_OF_COMMAND, b"old");
+        // New START discards partial, then END completes.
+        dev.queue_report6(PACKET_FLAG_START_OF_COMMAND, b"new");
+        dev.queue_report6(PACKET_FLAG_END_OF_COMMAND, b"!");
+        let (poll, mut cmd) = open_fake(dev);
+        cmd.set_active(true);
+        poll.poll();
+        cmd.update().unwrap();
+        let pkt = cmd.read_packet().unwrap();
+        assert_eq!(pkt, b"new!");
+    }
+
+    #[test]
+    fn report6_not_queued_when_inactive() {
+        let dev = FakeDevice::new();
+        dev.queue_report6(
+            PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND,
+            b"data",
+        );
+        let (poll, mut cmd) = open_fake(dev);
+        // Don't set active.
+        poll.poll();
+        cmd.update().unwrap();
+        assert!(cmd.read_packet().is_none());
+    }
+
+    #[test]
+    fn device_info_handshake() {
+        let dev = FakeDevice::new();
+        let serial = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+        let (poll, mut cmd) = open_fake(dev.clone());
+        assert!(!cmd.is_connected_with_info());
+
+        // First update sends the device info request.
+        cmd.update().unwrap();
+
+        // Now queue the response (simulating device replying).
+        dev.queue_device_info_response(false, 7, &serial);
+        poll.poll();
+        cmd.update().unwrap();
+
+        assert!(cmd.is_connected_with_info());
+        let info = cmd.device_info();
+        assert!(!info.is_player2);
+        assert_eq!(info.firmware_version, 7);
+        assert_eq!(info.serial, "0102030405060708090a0b0c0d0e0f10");
+    }
+
+    #[test]
+    fn device_info_player2() {
+        let dev = FakeDevice::new();
+        let serial = [0u8; SERIAL_SIZE];
+
+        let (poll, mut cmd) = open_fake(dev.clone());
+        cmd.update().unwrap();
+
+        dev.queue_device_info_response(true, 3, &serial);
+        poll.poll();
+        cmd.update().unwrap();
+
+        let info = cmd.device_info();
+        assert!(info.is_player2);
+        assert_eq!(info.firmware_version, 3);
+    }
+
+    #[test]
+    fn send_command_writes_packets() {
+        let dev = FakeDevice::new();
+        let serial = [0u8; SERIAL_SIZE];
+        dev.queue_device_info_response(false, 5, &serial);
+
+        let (poll, mut cmd) = open_fake(dev.clone());
+        // Complete handshake first.
+        cmd.update().unwrap();
+        poll.poll();
+        cmd.update().unwrap();
+
+        cmd.send_command(b"hello", None);
+        cmd.update().unwrap();
+
+        let writes = dev.get_writes();
+        // First write is device info request, second is our command.
+        assert!(writes.len() >= 2);
+        let cmd_pkt = &writes[1];
+        assert_eq!(cmd_pkt[0], HID_REPORT_COMMAND);
+        assert_eq!(
+            cmd_pkt[1],
+            PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND
+        );
+        assert_eq!(cmd_pkt[2], 5);
+        assert_eq!(&cmd_pkt[3..8], b"hello");
+    }
+
+    #[test]
+    fn command_callback_fires_on_response() {
+        let dev = FakeDevice::new();
+        let serial = [0u8; SERIAL_SIZE];
+        dev.queue_device_info_response(false, 5, &serial);
+
+        let (poll, mut cmd) = open_fake(dev.clone());
+        cmd.update().unwrap();
+        poll.poll();
+        cmd.update().unwrap();
+        cmd.set_active(true);
+
+        let response = Arc::new(Mutex::new(Vec::new()));
+        let resp_clone = Arc::clone(&response);
+        cmd.send_command(b"G", Some(Box::new(move |data| {
+            *resp_clone.lock().unwrap() = data;
+        })));
+        cmd.update().unwrap(); // sends command
+
+        // Queue response with HOST_CMD_FINISHED.
+        dev.queue_report6(
+            PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED,
+            b"Gcfg",
+        );
+        poll.poll();
+        cmd.update().unwrap();
+
+        assert_eq!(*response.lock().unwrap(), b"Gcfg");
+    }
+
+    #[test]
+    fn commands_serialized() {
+        let dev = FakeDevice::new();
+        let serial = [0u8; SERIAL_SIZE];
+        dev.queue_device_info_response(false, 5, &serial);
+
+        let (poll, mut cmd) = open_fake(dev.clone());
+        cmd.update().unwrap();
+        poll.poll();
+        cmd.update().unwrap();
+
+        // Queue two commands.
+        cmd.send_command(b"A", None);
+        cmd.send_command(b"B", None);
+        cmd.update().unwrap(); // sends first
+
+        let writes = dev.get_writes();
+        // Should only have device info + first command so far.
+        let cmd_writes: Vec<_> = writes.iter().skip(1).collect();
+        assert_eq!(cmd_writes.len(), 1);
+        assert_eq!(cmd_writes[0][3], b'A');
+    }
+
+    #[test]
+    fn close_invokes_pending_callbacks() {
+        let dev = FakeDevice::new();
+        let serial = [0u8; SERIAL_SIZE];
+        dev.queue_device_info_response(false, 5, &serial);
+
+        let (poll, mut cmd) = open_fake(dev);
+        cmd.update().unwrap();
+        poll.poll();
+        cmd.update().unwrap();
+
+        let called = Arc::new(AtomicU32::new(0));
+        let called_clone = Arc::clone(&called);
+        cmd.send_command(b"X", Some(Box::new(move |data| {
+            if data.is_empty() {
+                called_clone.fetch_add(1, Ordering::Relaxed);
+            }
+        })));
+        cmd.update().unwrap(); // sends it (now it's current_command)
+
+        cmd.close();
+        assert_eq!(called.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn write_error_returns_error() {
+        let dev = FakeDevice::new();
+        let serial = [0u8; SERIAL_SIZE];
+        dev.queue_device_info_response(false, 5, &serial);
+
+        let (poll, mut cmd) = open_fake(dev.clone());
+        cmd.update().unwrap();
+        poll.poll();
+        cmd.update().unwrap();
+
+        dev.set_fail_writes(true);
+        cmd.send_command(b"X", None);
+        let result = cmd.update();
+        assert!(result.is_err());
+    }
+}

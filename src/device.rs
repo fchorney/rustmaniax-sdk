@@ -612,6 +612,7 @@ fn convert_to_old_config(new_config: &SmxConfig, old_data: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytemuck::Zeroable;
 
     #[test]
     fn sensor_test_signature_check() {
@@ -650,5 +651,121 @@ mod tests {
         assert_eq!(threshold_0_high, 99);
         assert_eq!(debounce_delay, 200);
         assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn convert_version_0xff_copies_base_only() {
+        let mut old = vec![0u8; size_of::<OldSmxConfig>()];
+        // Set config_version to 0xFF (uninitialized).
+        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
+        old_struct.config_version = 0xFF;
+        old_struct.master_debounce_ms = 500;
+        old_struct.panel_threshold_7_low = 77;
+        old_struct.panel_threshold_0_low = 99; // v2 field — should NOT be copied
+
+        let mut config = SmxConfig::zeroed();
+        convert_to_new_config(&old, &mut config);
+
+        let debounce = config.debounce_nodelay_ms;
+        let t7 = config.panel_settings[7].load_cell_low_threshold;
+        let t0 = config.panel_settings[0].load_cell_low_threshold;
+        // masterVersion should remain as zeroed (not copied from 0xFF version).
+        let mv = config.master_version;
+
+        assert_eq!(debounce, 500);
+        assert_eq!(t7, 77);
+        assert_eq!(t0, 0); // v2 field not copied
+        assert_eq!(mv, 0); // not copied for 0xFF version
+    }
+
+    #[test]
+    fn convert_version_1_skips_v2_panels() {
+        let mut old = vec![0u8; size_of::<OldSmxConfig>()];
+        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
+        old_struct.config_version = 1;
+        old_struct.master_version = 2;
+        old_struct.panel_threshold_7_low = 50;
+        old_struct.panel_threshold_0_low = 88; // v2 field
+
+        let mut config = SmxConfig::zeroed();
+        convert_to_new_config(&old, &mut config);
+
+        let t7 = config.panel_settings[7].load_cell_low_threshold;
+        let t0 = config.panel_settings[0].load_cell_low_threshold;
+        let cv = config.config_version;
+        let mv = config.master_version;
+
+        assert_eq!(t7, 50);
+        assert_eq!(t0, 0); // v2 field not copied for version 1
+        assert_eq!(cv, 1);
+        assert_eq!(mv, 2);
+    }
+
+    #[test]
+    fn convert_version_2_copies_all_panels_but_not_debounce_delay() {
+        let mut old = vec![0u8; size_of::<OldSmxConfig>()];
+        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
+        old_struct.config_version = 2;
+        old_struct.master_version = 3;
+        old_struct.panel_threshold_0_low = 10;
+        old_struct.panel_threshold_3_low = 30;
+        old_struct.panel_threshold_5_low = 50;
+        old_struct.panel_threshold_6_low = 60;
+        old_struct.panel_threshold_8_low = 80;
+        old_struct.debounce_delay_ms = 999; // v3 field
+
+        let mut config = SmxConfig::zeroed();
+        convert_to_new_config(&old, &mut config);
+
+        assert_eq!(config.panel_settings[0].load_cell_low_threshold, 10);
+        assert_eq!(config.panel_settings[3].load_cell_low_threshold, 30);
+        assert_eq!(config.panel_settings[5].load_cell_low_threshold, 50);
+        assert_eq!(config.panel_settings[6].load_cell_low_threshold, 60);
+        assert_eq!(config.panel_settings[8].load_cell_low_threshold, 80);
+        let dd = config.debounce_delay_ms;
+        assert_eq!(dd, 0); // v3 field not copied for version 2
+    }
+
+    #[test]
+    fn convert_version_3_copies_debounce_delay() {
+        let mut old = vec![0u8; size_of::<OldSmxConfig>()];
+        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
+        old_struct.config_version = 3;
+        old_struct.master_version = 4;
+        old_struct.debounce_delay_ms = 250;
+        old_struct.panel_threshold_0_low = 11;
+
+        let mut config = SmxConfig::zeroed();
+        convert_to_new_config(&old, &mut config);
+
+        let dd = config.debounce_delay_ms;
+        assert_eq!(dd, 250);
+        assert_eq!(config.panel_settings[0].load_cell_low_threshold, 11);
+    }
+
+    #[test]
+    fn convert_enabled_sensors_and_step_color() {
+        let mut old = vec![0u8; size_of::<OldSmxConfig>()];
+        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
+        old_struct.config_version = 1;
+        old_struct.master_version = 1;
+        old_struct.enabled_sensors = [0x1F, 0x0A, 0x00, 0xFF, 0x55];
+        old_struct.step_color[0] = 100;
+        old_struct.step_color[26] = 200;
+
+        let mut config = SmxConfig::zeroed();
+        convert_to_new_config(&old, &mut config);
+
+        assert_eq!(config.enabled_sensors, [0x1F, 0x0A, 0x00, 0xFF, 0x55]);
+        assert_eq!(config.step_color[0], 100);
+        assert_eq!(config.step_color[26], 200);
+    }
+
+    #[test]
+    fn convert_to_old_extends_small_buffer() {
+        let config = SmxConfig::zeroed();
+        let mut old_data = vec![0u8; 10]; // too small
+        convert_to_old_config(&config, &mut old_data);
+        assert!(old_data.len() >= 128);
     }
 }

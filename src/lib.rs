@@ -5,3 +5,6 @@ pub mod error;
 pub mod lights;
 pub mod manager;
 pub mod protocol;
+
+#[cfg(test)]
+pub mod test_helpers;

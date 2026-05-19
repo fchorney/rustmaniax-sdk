@@ -312,4 +312,103 @@ mod tests {
         let completed = reassembler.take_completed();
         assert_eq!(completed, vec![vec![0xAA]]);
     }
+
+    #[test]
+    fn exactly_61_bytes_fits_single_packet() {
+        let cmd = vec![0x42; HID_MAX_PAYLOAD_SIZE];
+        let packets = build_command_packets(&cmd);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(
+            packets[0][1],
+            PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND
+        );
+        assert_eq!(packets[0][2], 61);
+    }
+
+    #[test]
+    fn large_command_fragments_correctly() {
+        // 183 bytes = 3 packets (61 + 61 + 61)
+        let cmd = vec![0xCC; 183];
+        let packets = build_command_packets(&cmd);
+        assert_eq!(packets.len(), 3);
+        assert_eq!(packets[0][1], PACKET_FLAG_START_OF_COMMAND);
+        assert_eq!(packets[1][1], 0); // middle packet: no flags
+        assert_eq!(packets[2][1], PACKET_FLAG_END_OF_COMMAND);
+        // All payloads are 61 bytes.
+        assert_eq!(packets[0][2], 61);
+        assert_eq!(packets[1][2], 61);
+        assert_eq!(packets[2][2], 61);
+    }
+
+    #[test]
+    fn parse_report6_wrong_report_id() {
+        let raw = vec![0x03, 0x00, 0x02, 0xAA, 0xBB];
+        assert!(parse_report6(&raw).is_none());
+    }
+
+    #[test]
+    fn parse_report6_truncated_payload() {
+        // Claims 5 bytes payload but only has 2.
+        let raw = vec![HID_REPORT_DATA, 0x05, 5, 0xAA, 0xBB];
+        assert!(parse_report6(&raw).is_none());
+    }
+
+    #[test]
+    fn parse_report6_fragment_flags() {
+        let raw = vec![
+            HID_REPORT_DATA,
+            PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED,
+            3,
+            0x01, 0x02, 0x03,
+        ];
+        let parsed = parse_report6(&raw).unwrap();
+        match parsed {
+            ParsedPacket::Fragment {
+                payload,
+                start_of_command,
+                end_of_command,
+                host_cmd_finished,
+            } => {
+                assert_eq!(payload, vec![1, 2, 3]);
+                assert!(start_of_command);
+                assert!(!end_of_command);
+                assert!(host_cmd_finished);
+            }
+            _ => panic!("expected Fragment"),
+        }
+    }
+
+    #[test]
+    fn reassembler_host_cmd_finished_returns_true() {
+        let mut reassembler = PacketReassembler::new();
+        let fragment = ParsedPacket::Fragment {
+            payload: vec![1],
+            start_of_command: true,
+            end_of_command: true,
+            host_cmd_finished: true,
+        };
+        let result = reassembler.push(&fragment);
+        assert!(result); // host_cmd_finished
+    }
+
+    #[test]
+    fn reassembler_ignores_device_info() {
+        let mut reassembler = PacketReassembler::new();
+        let result = reassembler.push(&ParsedPacket::DeviceInfo(vec![1, 2, 3]));
+        assert!(!result);
+        assert!(reassembler.take_completed().is_empty());
+    }
+
+    #[test]
+    fn command_packet_zero_padding() {
+        // Verify unused bytes in packet are zero.
+        let cmd = b"hi";
+        let packets = build_command_packets(cmd);
+        assert_eq!(packets[0][3], b'h');
+        assert_eq!(packets[0][4], b'i');
+        // Rest should be zero.
+        for &byte in &packets[0][5..] {
+            assert_eq!(byte, 0);
+        }
+    }
 }

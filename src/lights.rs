@@ -284,12 +284,19 @@ impl AnimationState {
 
 // ─── Firmware Upload Preparation ─────────────────────────────────────────────
 
+/// Apply the LED color scaling factor.
+pub fn scale_color(c: u8) -> u8 {
+    (c as f32 * LED_COLOR_SCALE) as u8
+}
+
 /// Prepared upload data ready to be sent to a device.
+#[derive(Debug)]
 pub struct UploadData {
     pub commands: Vec<UploadCommand>,
 }
 
 /// A single command in the upload sequence.
+#[derive(Debug)]
 pub enum UploadCommand {
     /// Data packet to send to the device.
     Packet(Vec<u8>),
@@ -547,23 +554,40 @@ mod tests {
 
     #[test]
     fn panel_extraction_14x15() {
-        // Create a minimal 14×15 RGBA image with known pixel values.
         let mut img = RgbaImage::new(14, 15);
-        // Set panel 0 (top-left, at 0,0) first pixel to red.
         img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
-        // Set panel 4 (center, at col=1 row=1, base_x=5 base_y=5) first pixel to green.
         img.put_pixel(5, 5, image::Rgba([0, 255, 0, 255]));
 
         let pf0 = extract_panel(&img, 0);
         assert_eq!(pf0.num_leds, 16);
-        assert_eq!(pf0.rgb[0], 255); // R
-        assert_eq!(pf0.rgb[1], 0);   // G
-        assert_eq!(pf0.rgb[2], 0);   // B
+        assert_eq!(pf0.rgb[0], 255);
+        assert_eq!(pf0.rgb[1], 0);
+        assert_eq!(pf0.rgb[2], 0);
 
         let pf4 = extract_panel(&img, 4);
         assert_eq!(pf4.rgb[0], 0);
         assert_eq!(pf4.rgb[1], 255);
         assert_eq!(pf4.rgb[2], 0);
+    }
+
+    #[test]
+    fn panel_extraction_23x24() {
+        let mut img = RgbaImage::new(23, 24);
+        // Panel 0, outer grid LED 0 at (0,0).
+        img.put_pixel(0, 0, image::Rgba([128, 64, 32, 255]));
+        // Panel 0, inner grid LED 0 at (1,1).
+        img.put_pixel(1, 1, image::Rgba([10, 20, 30, 255]));
+
+        let pf = extract_panel(&img, 0);
+        assert_eq!(pf.num_leds, 25);
+        // Outer LED 0.
+        assert_eq!(pf.rgb[0], 128);
+        assert_eq!(pf.rgb[1], 64);
+        assert_eq!(pf.rgb[2], 32);
+        // Inner LED 0 is at index 16 (after 4×4 outer).
+        assert_eq!(pf.rgb[16 * 3], 10);
+        assert_eq!(pf.rgb[16 * 3 + 1], 20);
+        assert_eq!(pf.rgb[16 * 3 + 2], 30);
     }
 
     #[test]
@@ -576,18 +600,194 @@ mod tests {
         };
 
         let mut rgb = vec![0u8; 25 * 3];
-        // LED 0 = red (palette index 0)
-        rgb[0] = 255;
-        // LED 1 = green (palette index 1)
-        rgb[4] = 255;
+        rgb[0] = 255; // LED 0 = red (index 0)
+        rgb[4] = 255; // LED 1 = green (index 1) — offset is 1*3+1=4
+
+        // Actually LED 1 green: rgb[3]=0, rgb[4]=255, rgb[5]=0
+        let mut rgb = vec![0u8; 25 * 3];
+        rgb[0] = 255; // LED 0 R
+        rgb[3] = 0; rgb[4] = 255; rgb[5] = 0; // LED 1 = green
 
         let frame = PanelFrame { rgb, num_leds: 25 };
         let packed = pack_graphic(&frame, &palette);
 
-        // LED 0 → index 0 in high nibble of byte 0.
-        // LED 1 → index 1 in low nibble of byte 0.
+        // LED 0 → index 0 in high nibble, LED 1 → index 1 in low nibble.
         assert_eq!(packed[0], 0x01);
-        // LED 2 onwards are black → index 15.
+        // LED 2 onwards are black → index 15 (0xF).
         assert_eq!(packed[1], 0xFF);
+    }
+
+    #[test]
+    fn load_rejects_wrong_dimensions() {
+        // Create a minimal valid 1x1 GIF.
+        let gif_data = create_test_gif(10, 10);
+        let mut state = AnimationState::new();
+        let result = state.load(&gif_data, 0, LightsType::Released);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("14x15 or 23x24"));
+    }
+
+    #[test]
+    fn load_rejects_corrupt_data() {
+        let mut state = AnimationState::new();
+        let result = state.load(b"not a gif", 0, LightsType::Released);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("couldn't be read"));
+    }
+
+    #[test]
+    fn load_rejects_empty_data() {
+        let mut state = AnimationState::new();
+        let result = state.load(&[], 0, LightsType::Released);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_rejects_invalid_pad() {
+        let gif_data = create_test_gif(14, 15);
+        let mut state = AnimationState::new();
+        let result = state.load(&gif_data, 2, LightsType::Released);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid pad"));
+    }
+
+    #[test]
+    fn load_accepts_14x15() {
+        let gif_data = create_test_gif(14, 15);
+        let mut state = AnimationState::new();
+        let result = state.load(&gif_data, 0, LightsType::Released);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn load_accepts_23x24() {
+        let gif_data = create_test_gif(23, 24);
+        let mut state = AnimationState::new();
+        let result = state.load(&gif_data, 0, LightsType::Released);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn load_accepts_pressed_type() {
+        let gif_data = create_test_gif(14, 15);
+        let mut state = AnimationState::new();
+        let result = state.load(&gif_data, 1, LightsType::Pressed);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn upload_rejects_14x15() {
+        let gif_data = create_test_gif(14, 15);
+        let result = prepare_upload(&gif_data, 0, LightsType::Released);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("23x24"));
+    }
+
+    #[test]
+    fn upload_accepts_23x24() {
+        let gif_data = create_test_gif_simple(23, 24);
+        let result = prepare_upload(&gif_data, 0, LightsType::Released);
+        assert!(result.is_ok(), "upload failed: {:?}", result.err());
+        let upload = result.unwrap();
+        assert!(!upload.commands.is_empty());
+    }
+
+    #[test]
+    fn upload_rejects_invalid_pad() {
+        let gif_data = create_test_gif(23, 24);
+        let result = prepare_upload(&gif_data, 2, LightsType::Released);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_frame_produces_correct_size() {
+        let gif_data = create_test_gif(23, 24);
+        let mut state = AnimationState::new();
+        state.load(&gif_data, 0, LightsType::Released).unwrap();
+        let frame = state.build_frame([0, 0]);
+        // 2 pads × 9 panels × 25 LEDs × 3 RGB = 1350.
+        assert_eq!(frame.len(), 1350);
+    }
+
+    #[test]
+    fn color_scaling() {
+        // 255 * 0.6666 ≈ 169.98 → 169
+        let scaled = scale_color(255);
+        assert!(scaled == 169 || scaled == 170);
+        assert_eq!(scale_color(0), 0);
+        assert_eq!(scale_color(128), (128.0 * LED_COLOR_SCALE) as u8);
+    }
+
+    #[test]
+    fn palette_max_15_colors() {
+        // Create frames with 16 distinct non-black colors.
+        let mut rgb = vec![0u8; 25 * 3];
+        for i in 0..16 {
+            rgb[i * 3] = (i + 1) as u8; // distinct non-zero R values
+            rgb[i * 3 + 1] = 0;
+            rgb[i * 3 + 2] = 0;
+        }
+        let frame = PanelFrame { rgb, num_leds: 25 };
+        let result = build_palette(&[frame]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too many colors"));
+    }
+
+    // ─── Test GIF Generation Helper ─────────────────────────────────────────
+
+    fn create_test_gif(width: u32, height: u32) -> Vec<u8> {
+        use image::codecs::gif::GifEncoder;
+        use image::{Frame, RgbaImage, Rgba};
+        use std::io::Cursor;
+
+        let mut img = RgbaImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                img.put_pixel(x, y, Rgba([
+                    ((x * 10) % 256) as u8,
+                    ((y * 10) % 256) as u8,
+                    0,
+                    255,
+                ]));
+            }
+        }
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut encoder = GifEncoder::new(&mut buf);
+            let frame = Frame::new(img);
+            encoder.encode_frames(std::iter::once(frame)).unwrap();
+        }
+        buf.into_inner()
+    }
+
+    /// Creates a GIF with very few colors (suitable for upload palette limit).
+    fn create_test_gif_simple(width: u32, height: u32) -> Vec<u8> {
+        use image::codecs::gif::GifEncoder;
+        use image::{Frame, RgbaImage, Rgba};
+        use std::io::Cursor;
+
+        let mut img = RgbaImage::new(width, height);
+        // Use only 3 colors: red, green, black.
+        for y in 0..height {
+            for x in 0..width {
+                let color = if (x + y) % 3 == 0 {
+                    Rgba([255, 0, 0, 255])
+                } else if (x + y) % 3 == 1 {
+                    Rgba([0, 255, 0, 255])
+                } else {
+                    Rgba([0, 0, 0, 255])
+                };
+                img.put_pixel(x, y, color);
+            }
+        }
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut encoder = GifEncoder::new(&mut buf);
+            let frame = Frame::new(img);
+            encoder.encode_frames(std::iter::once(frame)).unwrap();
+        }
+        buf.into_inner()
     }
 }
