@@ -652,7 +652,7 @@ mod tests {
         let dev = FakeDevice::new();
         let (poll, _cmd) = open_fake(dev.clone());
         assert!(!poll.poll());
-        assert!(!dev.clone().read(&mut [0; 64]).is_err());
+        assert!(dev.clone().read(&mut [0; 64]).is_ok());
     }
 
     #[test]

@@ -351,7 +351,7 @@ fn generate_test_animation_gif() -> Vec<u8> {
                 Frame::new(img)
             })
             .collect();
-        encoder.encode_frames(frames.into_iter()).unwrap();
+        encoder.encode_frames(frames).unwrap();
     }
     buf.into_inner()
 }

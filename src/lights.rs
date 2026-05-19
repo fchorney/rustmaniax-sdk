@@ -600,11 +600,6 @@ mod tests {
         };
 
         let mut rgb = vec![0u8; 25 * 3];
-        rgb[0] = 255; // LED 0 = red (index 0)
-        rgb[4] = 255; // LED 1 = green (index 1) — offset is 1*3+1=4
-
-        // Actually LED 1 green: rgb[3]=0, rgb[4]=255, rgb[5]=0
-        let mut rgb = vec![0u8; 25 * 3];
         rgb[0] = 255; // LED 0 R
         rgb[3] = 0; rgb[4] = 255; rgb[5] = 0; // LED 1 = green
 
