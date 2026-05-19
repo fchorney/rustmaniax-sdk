@@ -5,7 +5,6 @@ use rustmaniax_sdk::{PanelTestMode, SmxManager};
 use rustmaniax_sdk::HID_REPORT_COMMAND;
 use rustmaniax_sdk::test_helpers::{wait_for, FakeDevice, FakeEnumerator};
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn make_manager_one_device(
