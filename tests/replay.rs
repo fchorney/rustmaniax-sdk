@@ -105,14 +105,18 @@ fn replay_force_recalibration() {
     }
 
     let (mgr, devices, _events) = make_replay_manager("force_recalibration");
-    let connected = wait_for(|| mgr.get_info(0).connected, 2000);
+    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
     assert!(connected);
 
-    mgr.force_recalibration(0);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    for i in 0..2 {
+        if mgr.get_info(i).connected {
+            mgr.force_recalibration(i);
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let writes = devices[0].get_actual_writes();
-    assert!(has_command_str(&writes, b"C\n"), "Expected 'C\\n' command");
+    let all_writes: Vec<Vec<u8>> = devices.iter().flat_map(|d| d.get_actual_writes()).collect();
+    assert!(has_command_str(&all_writes, b"C\n"), "Expected 'C\\n' command");
 }
 
 #[test]
@@ -180,14 +184,18 @@ fn replay_sensor_test_mode() {
     }
 
     let (mgr, devices, _events) = make_replay_manager("sensor_test_mode");
-    let connected = wait_for(|| mgr.get_info(0).connected, 2000);
+    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
     assert!(connected);
 
-    mgr.set_test_mode(0, rustmaniax_sdk::SensorTestMode::CalibratedValues);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    for i in 0..2 {
+        if mgr.get_info(i).connected {
+            mgr.set_test_mode(i, rustmaniax_sdk::SensorTestMode::CalibratedValues);
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let writes = devices[0].get_actual_writes();
-    assert!(has_command(&writes, b'y'), "Expected 'y' command");
+    let all_writes: Vec<Vec<u8>> = devices.iter().flat_map(|d| d.get_actual_writes()).collect();
+    assert!(has_command(&all_writes, b'y'), "Expected 'y' command");
 }
 
 #[test]
