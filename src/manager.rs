@@ -3,7 +3,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::connection::{self, HidEnumerator, PollHandle};
+use crate::connection::{self, HidEnumerator, HidapiEnumerator, PollHandle};
 use crate::device::{SmxDevice, SmxInfo, UpdateReason};
 use crate::protocol::{
     BYTES_PER_PAD_16, BYTES_PER_PAD_25, ENUMERATION_INTERVAL_SECONDS, LED_COLOR_SCALE,
@@ -63,7 +63,27 @@ struct ManagerState {
 }
 
 impl SmxManager {
-    /// Creates a new manager and starts background threads.
+    /// Creates a manager using the real hidapi enumerator.
+    /// If `SMX_CAPTURE_DIR` is set, wraps it with a recording layer that writes
+    /// `.smxhid` files directly into that directory (overwriting previous captures).
+    pub fn start(callback: impl Fn(usize, UpdateReason) + Send + 'static) -> Result<Self, crate::error::SmxError> {
+        let enumerator: Box<dyn HidEnumerator> = {
+            let real = Box::new(HidapiEnumerator::new()?);
+            match std::env::var("SMX_CAPTURE_DIR") {
+                Ok(dir) if !dir.is_empty() => {
+                    Box::new(crate::recorder::RecordingEnumerator::new(
+                        real,
+                        std::path::Path::new(&dir),
+                        false,
+                    ))
+                }
+                _ => real,
+            }
+        };
+        Ok(Self::new(enumerator, callback))
+    }
+
+    /// Creates a new manager with a custom enumerator and starts background threads.
     pub fn new(
         enumerator: Box<dyn HidEnumerator>,
         callback: impl Fn(usize, UpdateReason) + Send + 'static,

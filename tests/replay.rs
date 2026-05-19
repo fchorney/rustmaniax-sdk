@@ -4,9 +4,9 @@
 
 use std::path::Path;
 
-use rustmaniax_sdk::device::UpdateReason;
-use rustmaniax_sdk::manager::SmxManager;
-use rustmaniax_sdk::protocol::HID_REPORT_COMMAND;
+use rustmaniax_sdk::UpdateReason;
+use rustmaniax_sdk::SmxManager;
+use rustmaniax_sdk::HID_REPORT_COMMAND;
 use rustmaniax_sdk::test_helpers::{wait_for, ReplayDevice, ReplayEnumerator};
 
 use std::sync::{Arc, Mutex};
@@ -183,7 +183,7 @@ fn replay_sensor_test_mode() {
     let connected = wait_for(|| mgr.get_info(0).connected, 2000);
     assert!(connected);
 
-    mgr.set_test_mode(0, rustmaniax_sdk::device::SensorTestMode::CalibratedValues);
+    mgr.set_test_mode(0, rustmaniax_sdk::SensorTestMode::CalibratedValues);
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = devices[0].get_actual_writes();
@@ -201,7 +201,7 @@ fn replay_panel_test_mode() {
     let connected = wait_for(|| mgr.get_info(0).connected, 2000);
     assert!(connected);
 
-    mgr.set_panel_test_mode(rustmaniax_sdk::manager::PanelTestMode::PressureTest);
+    mgr.set_panel_test_mode(rustmaniax_sdk::PanelTestMode::PressureTest);
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = devices[0].get_actual_writes();

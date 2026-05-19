@@ -1,8 +1,8 @@
 //! Full-stack integration tests exercising SmxManager with fake HID devices.
 
-use rustmaniax_sdk::device::UpdateReason;
-use rustmaniax_sdk::manager::{PanelTestMode, SmxManager};
-use rustmaniax_sdk::protocol::HID_REPORT_COMMAND;
+use rustmaniax_sdk::UpdateReason;
+use rustmaniax_sdk::{PanelTestMode, SmxManager};
+use rustmaniax_sdk::HID_REPORT_COMMAND;
 use rustmaniax_sdk::test_helpers::{wait_for, FakeDevice, FakeEnumerator};
 
 use std::sync::atomic::{AtomicU32, Ordering};
