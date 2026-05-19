@@ -296,3 +296,191 @@ pub fn wait_for(cond: impl Fn() -> bool, timeout_ms: u64) -> bool {
     }
     true
 }
+
+// ─── .smxhid Capture File Parsing ────────────────────────────────────────────
+
+/// A single record from a .smxhid capture file.
+#[derive(Clone, Debug)]
+pub struct HidCaptureRecord {
+    pub record_type: u8, // b'R' or b'W'
+    pub timestamp_us: u64,
+    pub data: Vec<u8>,
+}
+
+const HID_CAPTURE_MAGIC: &[u8; 7] = b"SMXHID\x01";
+
+/// Load all records from a .smxhid capture file.
+pub fn load_hid_capture(path: &std::path::Path) -> Vec<HidCaptureRecord> {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut magic = [0u8; 7];
+    if file.read_exact(&mut magic).is_err() || &magic != HID_CAPTURE_MAGIC {
+        return Vec::new();
+    }
+
+    let mut records = Vec::new();
+    loop {
+        let mut type_buf = [0u8; 1];
+        if file.read_exact(&mut type_buf).is_err() {
+            break;
+        }
+        let mut ts_buf = [0u8; 8];
+        if file.read_exact(&mut ts_buf).is_err() {
+            break;
+        }
+        let mut size_buf = [0u8; 2];
+        if file.read_exact(&mut size_buf).is_err() {
+            break;
+        }
+        let size = u16::from_le_bytes(size_buf) as usize;
+        let mut data = vec![0u8; size];
+        if file.read_exact(&mut data).is_err() {
+            break;
+        }
+        records.push(HidCaptureRecord {
+            record_type: type_buf[0],
+            timestamp_us: u64::from_le_bytes(ts_buf),
+            data,
+        });
+    }
+    records
+}
+
+/// Replay HID device that feeds captured traffic back through the SDK.
+///
+/// Reads are gated by writes: reads recorded between write N-1 and write N
+/// become available only after N writes have occurred. Reads before the first
+/// write are available immediately.
+#[derive(Clone)]
+pub struct ReplayDevice {
+    inner: Arc<Mutex<ReplayDeviceInner>>,
+}
+
+struct ReplayDeviceInner {
+    /// read_batches[i] = reads available after i writes have occurred.
+    read_batches: Vec<VecDeque<Vec<u8>>>,
+    write_count: usize,
+    actual_writes: Vec<Vec<u8>>,
+    expected_writes: Vec<Vec<u8>>,
+}
+
+impl ReplayDevice {
+    /// Create a replay device from a capture file path.
+    pub fn from_file(path: &std::path::Path) -> Self {
+        let records = load_hid_capture(path);
+        Self::from_records(&records)
+    }
+
+    /// Create a replay device from pre-loaded records.
+    pub fn from_records(records: &[HidCaptureRecord]) -> Self {
+        let mut read_batches: Vec<VecDeque<Vec<u8>>> = vec![VecDeque::new()];
+        let mut expected_writes = Vec::new();
+
+        for rec in records {
+            match rec.record_type {
+                b'R' => {
+                    read_batches.last_mut().unwrap().push_back(rec.data.clone());
+                }
+                b'W' => {
+                    expected_writes.push(rec.data.clone());
+                    read_batches.push(VecDeque::new());
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            inner: Arc::new(Mutex::new(ReplayDeviceInner {
+                read_batches,
+                write_count: 0,
+                actual_writes: Vec::new(),
+                expected_writes,
+            })),
+        }
+    }
+
+    /// Get all writes that were sent to this device.
+    pub fn get_actual_writes(&self) -> Vec<Vec<u8>> {
+        self.inner.lock().unwrap().actual_writes.clone()
+    }
+
+    /// Get the expected writes from the capture file.
+    pub fn get_expected_writes(&self) -> Vec<Vec<u8>> {
+        self.inner.lock().unwrap().expected_writes.clone()
+    }
+}
+
+impl HidDevice for ReplayDevice {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, SmxError> {
+        let mut inner = self.inner.lock().unwrap();
+        // Return reads from all batches up to current write count.
+        for i in 0..=inner.write_count {
+            if i >= inner.read_batches.len() {
+                break;
+            }
+            if let Some(pkt) = inner.read_batches[i].pop_front() {
+                let len = pkt.len().min(buf.len());
+                buf[..len].copy_from_slice(&pkt[..len]);
+                return Ok(len);
+            }
+        }
+        Ok(0)
+    }
+
+    fn write(&self, buf: &[u8]) -> Result<usize, SmxError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.actual_writes.push(buf.to_vec());
+        inner.write_count += 1;
+        Ok(buf.len())
+    }
+}
+
+/// Replay-based enumerator that serves ReplayDevices from capture files.
+pub struct ReplayEnumerator {
+    devices: Vec<(String, ReplayDevice)>,
+}
+
+impl ReplayEnumerator {
+    /// Create from a directory containing device_0.smxhid, device_1.smxhid, etc.
+    pub fn from_capture_dir(dir: &std::path::Path) -> Self {
+        let mut devices = Vec::new();
+        for i in 0..2 {
+            let path = dir.join(format!("device_{i}.smxhid"));
+            if path.exists() {
+                let dev = ReplayDevice::from_file(&path);
+                devices.push((format!("/dev/smx_replay_{i}"), dev));
+            }
+        }
+        Self { devices }
+    }
+
+    /// Create from pre-built device list (allows sharing devices with test code).
+    pub fn from_devices(devices: Vec<(String, ReplayDevice)>) -> Self {
+        Self { devices }
+    }
+}
+
+impl HidEnumerator for ReplayEnumerator {
+    fn enumerate(&self, _vid: u16, _pid: u16) -> Vec<HidDeviceInfo> {
+        self.devices
+            .iter()
+            .map(|(path, _)| HidDeviceInfo {
+                path: path.clone(),
+                product: "StepManiaX".to_string(),
+            })
+            .collect()
+    }
+
+    fn open(&self, path: &str) -> Result<Box<dyn HidDevice>, SmxError> {
+        for (p, dev) in &self.devices {
+            if p == path {
+                return Ok(Box::new(dev.clone()));
+            }
+        }
+        Err(SmxError::NotConnected)
+    }
+}
