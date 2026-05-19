@@ -324,16 +324,24 @@ impl Drop for SmxManager {
 
 fn usb_polling_loop(shared: Arc<ManagerShared>) {
     while !shared.shutdown.load(Ordering::Relaxed) {
-        let mut has_report6 = false;
+        let mut should_wake = false;
         {
             let state = shared.state.lock().unwrap();
-            for poll_handle in state.poll_handles.iter().flatten() {
-                if poll_handle.poll() {
-                    has_report6 = true;
+            for (i, poll_handle) in state.poll_handles.iter().enumerate() {
+                if let Some(ph) = poll_handle {
+                    if ph.poll() {
+                        should_wake = true;
+                    }
+                }
+                // Also wake if a device has a read error (for prompt disconnect).
+                if let Some(conn) = state.devices[i].connection() {
+                    if conn.has_read_error() {
+                        should_wake = true;
+                    }
                 }
             }
         }
-        if has_report6 {
+        if should_wake {
             shared.wake.notify_all();
         }
         let us = shared.usb_polling_sleep_us.load(Ordering::Relaxed).max(100);
@@ -380,6 +388,7 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
                 if connected {
                     let info = state.devices[i].get_info();
                     (state.callback)(SmxEvent::Connected { pad: i, info });
+                    (state.callback)(SmxEvent::ConfigUpdated { pad: i });
                 }
             }
 
@@ -443,6 +452,11 @@ fn attempt_connections(state: &mut ManagerState) {
             continue;
         }
 
+        // Only connect to StepManiaX devices.
+        if !dev_info.product.contains("StepManiaX") {
+            continue;
+        }
+
         // Skip paths that previously failed to open.
         if state.failed_paths.contains(&dev_info.path) {
             continue;
@@ -475,8 +489,9 @@ fn attempt_connections(state: &mut ManagerState) {
         // Create the split connection.
         let input_cb = {
             let callback = Arc::clone(&state.callback);
-            let pad = slot_idx;
+            let pad_index = state.devices[slot_idx].pad_index_shared();
             Some(Box::new(move |new_state: u16| {
+                let pad = pad_index.load(std::sync::atomic::Ordering::Relaxed);
                 (callback)(SmxEvent::InputState { pad, state: new_state });
             }) as Box<dyn Fn(u16) + Send>)
         };
@@ -511,6 +526,9 @@ fn correct_device_order(state: &mut ManagerState) -> bool {
     if should_swap {
         state.devices.swap(0, 1);
         state.poll_handles.swap(0, 1);
+        // Update pad indices so events report the correct pad number.
+        state.devices[0].set_pad_index(0);
+        state.devices[1].set_pad_index(1);
     }
     should_swap
 }

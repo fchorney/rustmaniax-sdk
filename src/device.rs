@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::Zeroable;
@@ -63,7 +64,7 @@ pub struct SensorTestData {
 
 /// High-level per-controller state and logic.
 pub struct SmxDevice {
-    pad_index: usize,
+    pad_index: Arc<std::sync::atomic::AtomicUsize>,
     update_callback: Option<Box<dyn Fn(SmxEvent) + Send>>,
     connection: Option<CommandHandle>,
 
@@ -86,7 +87,7 @@ pub struct SmxDevice {
 impl SmxDevice {
     pub fn new(pad_index: usize) -> Self {
         Self {
-            pad_index,
+            pad_index: Arc::new(std::sync::atomic::AtomicUsize::new(pad_index)),
             update_callback: None,
             connection: None,
             config: SmxConfig::zeroed(),
@@ -105,6 +106,15 @@ impl SmxDevice {
 
     pub fn set_update_callback(&mut self, cb: Box<dyn Fn(SmxEvent) + Send>) {
         self.update_callback = Some(cb);
+    }
+
+    pub fn set_pad_index(&self, index: usize) {
+        self.pad_index.store(index, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the shared pad index (for use in input callbacks).
+    pub fn pad_index_shared(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.pad_index)
     }
 
     pub fn set_connection(&mut self, conn: CommandHandle) {
@@ -235,17 +245,17 @@ impl SmxDevice {
         if let Some(cb) = &self.update_callback {
             let event = match reason {
                 UpdateReason::Connected => SmxEvent::Connected {
-                    pad: self.pad_index,
+                    pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed),
                     info: self.get_info(),
                 },
-                UpdateReason::Disconnected => SmxEvent::Disconnected { pad: self.pad_index },
-                UpdateReason::ConfigUpdated => SmxEvent::ConfigUpdated { pad: self.pad_index },
+                UpdateReason::Disconnected => SmxEvent::Disconnected { pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed) },
+                UpdateReason::ConfigUpdated => SmxEvent::ConfigUpdated { pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed) },
                 UpdateReason::SensorTestData => SmxEvent::SensorTestData {
-                    pad: self.pad_index,
+                    pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed),
                     data: self.sensor_test_data.clone(),
                 },
                 UpdateReason::InputState => SmxEvent::InputState {
-                    pad: self.pad_index,
+                    pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed),
                     state: self.input_state(),
                 },
                 UpdateReason::Updated => return,
