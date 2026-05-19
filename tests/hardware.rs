@@ -80,7 +80,6 @@ fn hardware_connection() {
     let pads = connected_pads();
     assert!(!pads.is_empty(), "No SMX device detected. Is a pad connected?");
 
-    let evts = events.lock().unwrap();
 
     for i in &pads {
         let info = mgr.get_info(*i);

@@ -63,6 +63,10 @@ struct ManagerState {
 
     // Input state tracking for change detection.
     last_input_state: [u16; 2],
+    always_fire_input: bool,
+
+    // Paths that failed to open (cleared on next successful enumeration refresh).
+    failed_paths: Vec<String>,
 }
 
 impl SmxManager {
@@ -111,6 +115,8 @@ impl SmxManager {
             pending_lights: Vec::new(),
             delay_lights_until: None,
             last_input_state: [0; 2],
+            always_fire_input: false,
+            failed_paths: Vec::new(),
         };
 
         let shared = Arc::new(ManagerShared {
@@ -196,7 +202,8 @@ impl SmxManager {
 
     /// Sets whether input callbacks fire on every packet.
     pub fn set_input_state_mode(&self, always_fire: bool) {
-        let state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap();
+        state.always_fire_input = always_fire;
         for device in &state.devices {
             if let Some(conn) = device.connection() {
                 conn.set_always_fire_input(always_fire);
@@ -428,8 +435,16 @@ fn attempt_connections(state: &mut ManagerState) {
 
     let devs = state.enumerator.enumerate(SMX_USB_VENDOR_ID, SMX_USB_PRODUCT_ID);
 
+    // Clear failed paths that are no longer in the enumeration (device was unplugged).
+    state.failed_paths.retain(|p| devs.iter().any(|d| d.path == *p));
+
     for dev_info in devs {
         if dev_info.path.is_empty() {
+            continue;
+        }
+
+        // Skip paths that previously failed to open.
+        if state.failed_paths.contains(&dev_info.path) {
             continue;
         }
 
@@ -452,6 +467,7 @@ fn attempt_connections(state: &mut ManagerState) {
             Ok(d) => d,
             Err(e) => {
                 log::error!("Error opening device {}: {e}", dev_info.path);
+                state.failed_paths.push(dev_info.path.clone());
                 continue;
             }
         };
@@ -467,6 +483,9 @@ fn attempt_connections(state: &mut ManagerState) {
 
         match connection::open_connection(dev_info.path, device, input_cb) {
             Ok((poll_handle, cmd_handle)) => {
+                if state.always_fire_input {
+                    cmd_handle.set_always_fire_input(true);
+                }
                 state.devices[slot_idx].set_connection(cmd_handle);
                 state.poll_handles[slot_idx] = Some(poll_handle);
             }

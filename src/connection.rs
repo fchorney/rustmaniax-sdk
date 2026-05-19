@@ -52,28 +52,30 @@ impl HidDevice for HidapiDevice {
 
 /// HID enumerator backed by the `hidapi` crate.
 pub struct HidapiEnumerator {
-    api: std::sync::Arc<hidapi::HidApi>,
+    api: std::sync::Arc<std::sync::Mutex<hidapi::HidApi>>,
 }
 
 impl HidapiEnumerator {
     /// Creates a new enumerator with its own `HidApi` instance.
     pub fn new() -> Result<Self, SmxError> {
         Ok(Self {
-            api: std::sync::Arc::new(hidapi::HidApi::new()?),
+            api: std::sync::Arc::new(std::sync::Mutex::new(hidapi::HidApi::new()?)),
         })
     }
 
     /// Creates an enumerator sharing an existing `HidApi` instance.
     /// Use this when the host application (e.g., deadsync) already owns a `HidApi`.
-    pub fn from_shared(api: std::sync::Arc<hidapi::HidApi>) -> Self {
+    pub fn from_shared(api: std::sync::Arc<std::sync::Mutex<hidapi::HidApi>>) -> Self {
         Self { api }
     }
 }
 
 impl HidEnumerator for HidapiEnumerator {
     fn enumerate(&self, vid: u16, pid: u16) -> Vec<HidDeviceInfo> {
-        self.api
-            .device_list()
+        let mut api = self.api.lock().unwrap();
+        // Refresh to pick up newly connected/disconnected devices.
+        let _ = api.refresh_devices();
+        api.device_list()
             .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
             .map(|d| HidDeviceInfo {
                 path: d.path().to_string_lossy().into_owned(),
@@ -83,7 +85,8 @@ impl HidEnumerator for HidapiEnumerator {
     }
 
     fn open(&self, path: &str) -> Result<Box<dyn HidDevice>, SmxError> {
-        let dev = self.api.open_path(&std::ffi::CString::new(path).unwrap())?;
+        let api = self.api.lock().unwrap();
+        let dev = api.open_path(&std::ffi::CString::new(path).unwrap())?;
         dev.set_blocking_mode(false)?;
         Ok(Box::new(HidapiDevice { dev }))
     }
