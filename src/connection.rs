@@ -436,21 +436,18 @@ impl CommandHandle {
 
                 let host_cmd_finished = self.reassembler.push(&parsed);
 
-                if host_cmd_finished {
-                    if let Some(cmd) = self.current_command.take() {
-                        // Give the callback the current reassembled data.
-                        let completed = self.reassembler.take_completed();
-                        let response = completed.into_iter().last().unwrap_or_default();
-                        if let Some(cb) = cmd.callback {
+                // Queue any fully reassembled packets for read_packet().
+                for packet in self.reassembler.take_completed() {
+                    self.read_buffers.push_back(packet);
+                }
+
+                // If host_cmd_finished, clear the current command and invoke callback.
+                if host_cmd_finished
+                    && let Some(cmd) = self.current_command.take()
+                        && let Some(cb) = cmd.callback {
+                            let response = self.read_buffers.back().cloned().unwrap_or_default();
                             cb(response);
                         }
-                    }
-                } else {
-                    // Queue any fully reassembled packets for read_packet().
-                    for packet in self.reassembler.take_completed() {
-                        self.read_buffers.push_back(packet);
-                    }
-                }
             }
         }
     }
@@ -887,5 +884,28 @@ mod tests {
         cmd.send_command(b"X", None);
         let result = cmd.update();
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod auto_tests {
+    use super::*;
+    use crate::test_helpers::FakeDevice;
+
+    #[test]
+    fn auto_device_connects() {
+        let dev = FakeDevice::new_auto(false, 5);
+        let (poll, mut cmd) = open_connection(
+            "/dev/test".to_string(),
+            Box::new(dev),
+            None,
+        ).unwrap();
+
+        // Cycle: update sends request, write triggers auto-response, poll reads it, update processes.
+        cmd.update().unwrap();
+        poll.poll();
+        cmd.update().unwrap();
+        assert!(cmd.is_connected_with_info(), "device info not received");
+        assert_eq!(cmd.device_info().firmware_version, 5);
     }
 }

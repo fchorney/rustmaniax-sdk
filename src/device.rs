@@ -202,6 +202,9 @@ impl SmxDevice {
             return Ok(());
         };
         if !conn.is_connected_with_info() {
+            // Still need to process I/O for the handshake to complete.
+            let conn = self.connection.as_mut().unwrap();
+            conn.update()?;
             return Ok(());
         }
 
@@ -767,5 +770,39 @@ mod tests {
         let mut old_data = vec![0u8; 10]; // too small
         convert_to_old_config(&config, &mut old_data);
         assert!(old_data.len() >= 128);
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::connection;
+    use crate::test_helpers::FakeDevice;
+
+    #[test]
+    fn device_connects_with_auto_fake() {
+        let fake = FakeDevice::new_auto(false, 5);
+        let (poll, cmd) = connection::open_connection(
+            "/dev/test".to_string(),
+            Box::new(fake),
+            None,
+        )
+        .unwrap();
+
+        let mut device = SmxDevice::new(0);
+        device.set_connection(cmd);
+
+        // Simulate the manager loop: update then poll, repeat.
+        for _ in 0..20 {
+            device.update().unwrap();
+            poll.poll();
+            if device.is_connected() {
+                break;
+            }
+        }
+        assert!(device.is_connected(), "Device did not connect");
+        let info = device.get_info();
+        assert_eq!(info.firmware_version, 5);
+        assert!(!info.is_player2);
     }
 }

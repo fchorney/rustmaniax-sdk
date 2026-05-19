@@ -6,5 +6,5 @@ pub mod lights;
 pub mod manager;
 pub mod protocol;
 
-#[cfg(test)]
+#[doc(hidden)]
 pub mod test_helpers;
