@@ -340,17 +340,23 @@ fn hardware_animation_upload() {
         let upload = rustmaniax_sdk::prepare_upload(&gif, pad, rustmaniax_sdk::LightsType::Released)
             .expect("Failed to prepare upload");
 
-        println!("Pad {pad}: prepared {} upload commands", upload.commands.len());
+        let total = upload.commands.len();
+        println!("Pad {pad}: sending {} upload commands", total);
 
-        for cmd in &upload.commands {
+        for (i, cmd) in upload.commands.iter().enumerate() {
             match cmd {
-                rustmaniax_sdk::UploadCommand::Packet(data) => assert!(!data.is_empty()),
+                rustmaniax_sdk::UploadCommand::Packet(data) => {
+                    mgr.send_command(pad, data, None);
+                }
                 rustmaniax_sdk::UploadCommand::Delay(ms) => {
                     std::thread::sleep(Duration::from_millis(*ms as u64));
                 }
             }
+            if (i + 1) % 50 == 0 || i + 1 == total {
+                println!("  progress: {}/{}", i + 1, total);
+            }
         }
-        println!("Pad {pad}: upload preparation verified");
+        println!("Pad {pad}: upload complete");
     }
 }
 

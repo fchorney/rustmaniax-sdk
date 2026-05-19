@@ -256,6 +256,19 @@ impl SmxManager {
         state.devices[pad].factory_reset();
     }
 
+    /// Sends a raw command to a pad. Used for animation upload and other low-level operations.
+    /// This is not part of the stable public API.
+    #[doc(hidden)]
+    pub fn send_command(&self, pad: usize, cmd: &[u8], callback: Option<crate::connection::CommandCallback>) {
+        if pad > 1 {
+            return;
+        }
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(conn) = state.devices[pad].connection_mut() {
+            conn.send_command(cmd, callback);
+        }
+    }
+
     /// Sets sensor test mode for a pad.
     pub fn set_test_mode(&self, pad: usize, mode: crate::device::SensorTestMode) {
         if pad > 1 {

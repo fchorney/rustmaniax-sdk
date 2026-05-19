@@ -44,7 +44,7 @@ pub use lights::{AnimationState, LightsType, UploadCommand, UploadData};
 pub use lights::prepare_upload;
 
 // Connection layer (for custom HID backends or testing).
-pub use connection::{HidDevice, HidDeviceInfo, HidEnumerator, HidapiEnumerator};
+pub use connection::{CommandCallback, HidDevice, HidDeviceInfo, HidEnumerator, HidapiEnumerator};
 
 // Recording (for debugging/capture).
 pub use recorder::{RecordingDevice, RecordingEnumerator};
