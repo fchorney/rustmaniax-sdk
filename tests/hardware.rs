@@ -360,6 +360,52 @@ fn hardware_animation_upload() {
 
 #[test]
 #[ignore]
+fn hardware_input_state_polling_rate() {
+    let (mgr, events) = get_manager();
+    let pads = connected_pads();
+    assert!(!pads.is_empty(), "No SMX device detected.");
+
+    mgr.set_input_state_mode(true);
+
+    // Count InputState events at default rate (1000µs) for 1 second.
+    let count_before = events.lock().unwrap().iter()
+        .filter(|e| matches!(e, SmxEvent::InputState { .. }))
+        .count();
+
+    std::thread::sleep(Duration::from_secs(1));
+
+    let count_after = events.lock().unwrap().iter()
+        .filter(|e| matches!(e, SmxEvent::InputState { .. }))
+        .count();
+
+    let packets_default = count_after - count_before;
+    println!("Default (1000µs): ~{packets_default} input packets/sec");
+    assert!(packets_default >= 10, "Expected >= 10 packets/sec, got {packets_default}");
+
+    // Switch to faster polling.
+    mgr.set_polling_rate(50, 500);
+
+    let count_before = events.lock().unwrap().iter()
+        .filter(|e| matches!(e, SmxEvent::InputState { .. }))
+        .count();
+
+    std::thread::sleep(Duration::from_secs(1));
+
+    let count_after = events.lock().unwrap().iter()
+        .filter(|e| matches!(e, SmxEvent::InputState { .. }))
+        .count();
+
+    let packets_fast = count_after - count_before;
+    println!("Fast (500µs): ~{packets_fast} input packets/sec");
+    assert!(packets_fast >= 10, "Expected >= 10 packets/sec, got {packets_fast}");
+
+    // Restore defaults.
+    mgr.set_polling_rate(50, 1000);
+    mgr.set_input_state_mode(false);
+}
+
+#[test]
+#[ignore]
 fn hardware_zzz_factory_reset() {
     let (mgr, _) = get_manager();
     let pads = connected_pads();
