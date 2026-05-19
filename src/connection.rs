@@ -205,9 +205,9 @@ impl PollHandle {
                     }
                     if (changed
                         || self.shared.always_fire_input.load(Ordering::Relaxed))
-                        && self.input_callback.is_some()
+                        && let Some(cb) = self.input_callback.as_ref()
                     {
-                        (self.input_callback.as_ref().unwrap())(new_state);
+                        cb(new_state);
                     }
                 }
                 HID_REPORT_DATA => {

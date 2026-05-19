@@ -590,6 +590,7 @@ fn scale_color(c: u8) -> u8 {
     (c as f32 * LED_COLOR_SCALE) as u8
 }
 
+#[allow(clippy::needless_range_loop)]
 fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
     if state.panel_test_mode != PanelTestMode::Off {
         return;
