@@ -28,6 +28,9 @@ pub const BYTES_PER_PAD_25: usize = NUM_PANELS * LEDS_PER_PANEL_25 * 3; // 675
 // Color scaling applied to LED values before sending.
 pub const LED_COLOR_SCALE: f32 = 0.6666;
 
+// Legacy lights-off command payload size (9 panels × 4 LEDs × 3 RGB).
+pub const LEGACY_LIGHTS_PAYLOAD_SIZE: usize = 108;
+
 // Timing constants (seconds).
 pub const COMMAND_TIMEOUT_SECONDS: f64 = 2.0;
 pub const CONFIG_WRITE_RATE_LIMIT_SECONDS: f64 = 1.0;
