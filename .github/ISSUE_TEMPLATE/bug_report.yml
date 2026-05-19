@@ -1,0 +1,60 @@
+name: Bug Report
+description: Report a bug with the SDK
+labels: [bug]
+body:
+  - type: input
+    id: os
+    attributes:
+      label: OS and Architecture
+      placeholder: "e.g., macOS 14 ARM64, Ubuntu 24.04 x86_64, Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust Version
+      placeholder: "Output of `rustc --version`"
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: SMX Pad Firmware Version
+      placeholder: "Printed on connection (e.g., fw=5)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to trigger the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log Output
+      description: "Run with `RUST_LOG=debug` and paste relevant lines."
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: capture
+    attributes:
+      label: Capture File
+      description: "If possible, run with `SMX_CAPTURE_DIR=capture/bug_report` and attach the `.smxhid` files."
+    validations:
+      required: false

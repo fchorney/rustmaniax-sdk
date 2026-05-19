@@ -4,6 +4,21 @@ Rust SDK for StepManiaX dance pad controllers.
 
 This is a port of [stepmaniax-sdk-mp](https://github.com/fchorney/stepmaniax-sdk-mp) (C++) to Rust.
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Dependencies](#dependencies)
+- [Building](#building)
+- [Running the Sample](#running-the-sample)
+- [Testing](#testing)
+- [Capture & Debugging Tools](#capture--debugging-tools)
+- [Integration Example](#integration-example)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Reporting Issues](#reporting-issues)
+- [License](#license)
+- [Acknowledgements](#acknowledgements)
+
 ## Quick Start
 
 ```rust
@@ -20,17 +35,21 @@ let mgr = SmxManager::start(|event| match event {
 }).unwrap();
 ```
 
+## Dependencies
+
+- **Rust** 1.85+ (edition 2024)
+- **hidapi** system library:
+  - macOS: `brew install hidapi`
+  - Linux: `sudo apt-get install libudev-dev`
+  - Windows: no additional dependencies (uses `windows-native` feature)
+- **Python 3** (optional, for `decode_smxhid.py` capture analysis)
+
 ## Building
 
 ```bash
 cargo build
 cargo test
-```
-
-### macOS
-
-```bash
-brew install hidapi
+cargo clippy
 ```
 
 ## Running the Sample
@@ -39,28 +58,46 @@ brew install hidapi
 cargo run --bin smx-sample
 cargo run --bin smx-sample -- --all-packets
 cargo run --bin smx-sample -- --calibrated
+cargo run --bin smx-sample -- --test-mode
 cargo run --bin smx-sample -- 50 500 --all-packets
 ```
 
-## Hardware Tests
+Flags:
+- `[main_thread_ms] [usb_polling_us]` — polling rate (positional args)
+- `--all-packets` — fire input callback on every USB packet (not just changes)
+- `--test-mode` — enable panel pressure test mode
+- `--uncalibrated` / `--calibrated` / `--noise` / `--tare` — sensor test modes
 
-Requires a physical SMX pad connected via USB:
+Enable debug logging with `RUST_LOG=debug`.
+
+## Testing
 
 ```bash
+# Unit + integration + replay tests (no hardware needed)
+cargo test
+
+# Hardware tests (requires SMX pad connected via USB)
 ./scripts/test-hardware.sh
-```
 
-To record captures:
-
-```bash
+# Record new captures for replay regression tests
 ./scripts/capture.sh
 ```
 
-## Documentation
+## Capture & Debugging Tools
 
-- [Design Differences from C++ SDK](docs/DESIGN_DIFFERENCES.md) — architectural decisions and rationale
-- [Architecture & Code Paths](docs/ARCHITECTURE.md) — threading model and data flow
-- [USB Protocol](https://github.com/fchorney/stepmaniax-sdk-mp/blob/main/docs/USB_PROTOCOL.md) — HID packet format (unchanged from C++ SDK)
+The SDK supports recording HID traffic to `.smxhid` files for debugging and regression testing. Set `SMX_CAPTURE_DIR` to enable:
+
+```bash
+SMX_CAPTURE_DIR=capture/my_session cargo run --bin smx-sample
+```
+
+To decode and inspect capture files:
+
+```bash
+python3 scripts/decode_smxhid.py capture/connection/device_0.smxhid
+```
+
+See the [C++ SDK's capture documentation](https://github.com/fchorney/stepmaniax-sdk-mp#capture-recording) for details on the `.smxhid` file format.
 
 ## Integration Example
 
@@ -69,8 +106,57 @@ If your application already owns a `HidApi` instance (e.g., [deadsync](https://g
 ```rust
 use std::sync::Arc;
 
-// Share deadsync's existing HidApi instance:
 let hid_api = Arc::new(std::sync::Mutex::new(hidapi::HidApi::new().unwrap()));
 let enumerator = rustmaniax_sdk::HidapiEnumerator::from_shared(hid_api);
 let smx = rustmaniax_sdk::SmxManager::new(Box::new(enumerator), |event| { /* ... */ });
 ```
+
+## Documentation
+
+- [Design Differences from C++ SDK](docs/DESIGN_DIFFERENCES.md) — architectural decisions and rationale
+- [Architecture & Code Paths](docs/ARCHITECTURE.md) — threading model and data flow
+- [USB Protocol](https://github.com/fchorney/stepmaniax-sdk-mp/blob/main/docs/USB_PROTOCOL.md) — HID packet format (unchanged from C++ SDK)
+
+## Contributing
+
+### Code Style
+
+- Run `cargo clippy` and `cargo test` before submitting
+- Follow existing patterns — match the style of surrounding code
+- Keep `unsafe` usage minimal and well-documented
+
+### Branching
+
+Use the format `initials/branch_name`:
+
+```
+fc/fix-reconnect-handling
+fc/add-animation-upload
+```
+
+### Key Considerations
+
+- All protocol changes must maintain compatibility with the C++ SDK's `.smxhid` capture format
+- New features should include unit tests and, where applicable, hardware integration tests
+- Packed struct fields require `read_unaligned`/`write_unaligned` — never take references to them
+
+## Reporting Issues
+
+When filing a bug report, please include:
+
+- **OS and architecture** (e.g., macOS 14 ARM64, Ubuntu 24.04 x86_64)
+- **Rust version** (`rustc --version`)
+- **SMX pad firmware version** (printed on connection)
+- **Steps to reproduce**
+- **Capture file** if possible — run with `SMX_CAPTURE_DIR=capture/bug_report` and attach the `.smxhid` files
+- **Log output** — run with `RUST_LOG=debug` and include relevant lines
+
+## Acknowledgements
+
+- [StepManiaX](https://stepmaniax.com/) — the original SDK and hardware
+- [stepmaniax-sdk-mp](https://github.com/fchorney/stepmaniax-sdk-mp) — the cross-platform C++ port this is based on
+- [deadsync](https://github.com/pnn64/deadsync) — the project that inspired this Rust port
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.
