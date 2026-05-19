@@ -10,6 +10,7 @@ hidapi = { version = "2.6.5", default-features = false }
 log = "0.4.29"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 bitflags = "2.11.1"
+image = { version = "0.25.10", default-features = false, features = ["gif"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hidapi = { version = "2.6.5", default-features = false, features = ["linux-static-hidraw"] }
