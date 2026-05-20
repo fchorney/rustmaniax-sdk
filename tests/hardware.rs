@@ -297,23 +297,22 @@ fn hardware_panel_animation() {
     let gif = generate_test_animation_gif();
     println!("Generated {}-byte animated GIF", gif.len());
 
-    let mut anim_state = rustmaniax_sdk::AnimationState::new();
     for &pad in &pads {
-        anim_state
-            .load(&gif, pad, rustmaniax_sdk::LightsType::Released)
+        mgr.load_animation(&gif, pad, rustmaniax_sdk::LightsType::Released)
             .expect("Failed to load animation");
         println!("Loaded animation for pad {pad}");
     }
 
-    println!("Playing animation for 3 seconds...");
-    let duration = Duration::from_secs(3);
-    let start = std::time::Instant::now();
-    while start.elapsed() < duration {
-        let input = [mgr.get_input_state(0), mgr.get_input_state(1)];
-        let frame = anim_state.build_frame(input);
-        mgr.set_lights(&frame);
-        std::thread::sleep(Duration::from_millis(33));
+    mgr.set_animation_auto(true);
+    println!("Auto-animation enabled, playing for 3 seconds...");
+    std::thread::sleep(Duration::from_secs(3));
+
+    for &pad in &pads {
+        assert!(mgr.get_info(pad).connected, "Pad {pad} disconnected during animation");
     }
+
+    mgr.set_animation_auto(false);
+    println!("Auto-animation disabled");
 
     mgr.reenable_auto_lights();
     std::thread::sleep(Duration::from_millis(500));

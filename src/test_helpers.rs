@@ -207,24 +207,20 @@ impl HidDevice for FakeDevice {
 
 /// Fake HID enumerator for testing.
 pub struct FakeEnumerator {
-    devices: Arc<Mutex<Vec<(String, FakeDevice, bool)>>>, // (path, device, opened)
+    devices: Vec<(String, FakeDevice)>,
 }
 
 impl FakeEnumerator {
     pub fn new(devices: Vec<(String, FakeDevice)>) -> Self {
-        let entries = devices.into_iter().map(|(p, d)| (p, d, false)).collect();
-        Self {
-            devices: Arc::new(Mutex::new(entries)),
-        }
+        Self { devices }
     }
 }
 
 impl HidEnumerator for FakeEnumerator {
     fn enumerate(&self, _vid: u16, _pid: u16) -> Vec<HidDeviceInfo> {
-        let devices = self.devices.lock().unwrap();
-        devices
+        self.devices
             .iter()
-            .map(|(path, _, _)| HidDeviceInfo {
+            .map(|(path, _)| HidDeviceInfo {
                 path: path.clone(),
                 product: "StepManiaX".to_string(),
             })
@@ -232,10 +228,8 @@ impl HidEnumerator for FakeEnumerator {
     }
 
     fn open(&self, path: &str) -> Result<Box<dyn HidDevice>, SmxError> {
-        let mut devices = self.devices.lock().unwrap();
-        for (p, dev, opened) in devices.iter_mut() {
-            if p == path && !*opened {
-                *opened = true;
+        for (p, dev) in &self.devices {
+            if p == path {
                 return Ok(Box::new(dev.clone()));
             }
         }
@@ -273,6 +267,8 @@ fn make_config_response_packets(firmware: u16) -> Vec<Vec<u8>> {
     payload.push(cmd_byte);
     payload.push(config_size);
     payload.resize(2 + config_size as usize, 0);
+    // Set master_version (offset 2 = first byte of config data) to firmware version.
+    payload[2] = firmware.min(255) as u8;
 
     // Single packet that fits within HID_MAX_PAYLOAD_SIZE (61 bytes).
     let mut pkt = vec![0u8; 3 + payload.len()];

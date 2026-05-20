@@ -31,6 +31,7 @@ pub struct SmxManager {
     shared: Arc<ManagerShared>,
     main_thread: Option<thread::JoinHandle<()>>,
     usb_thread: Option<thread::JoinHandle<()>>,
+    anim_thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 /// State shared between the manager's threads and the public API.
@@ -45,6 +46,10 @@ struct ManagerShared {
     // Polling rate config (atomics for lock-free access from threads).
     main_thread_sleep_ms: AtomicI32,
     usb_polling_sleep_us: AtomicI32,
+    // Animation state.
+    animation: Mutex<crate::lights::AnimationState>,
+    anim_running: AtomicBool,
+    anim_pause_until: Mutex<Option<Instant>>,
 }
 
 struct ManagerState {
@@ -126,6 +131,9 @@ impl SmxManager {
             enumerator: Mutex::new(enumerator),
             main_thread_sleep_ms: AtomicI32::new(50),
             usb_polling_sleep_us: AtomicI32::new(1000),
+            animation: Mutex::new(crate::lights::AnimationState::new()),
+            anim_running: AtomicBool::new(false),
+            anim_pause_until: Mutex::new(None),
         });
 
         let shared_main = Arc::clone(&shared);
@@ -138,6 +146,7 @@ impl SmxManager {
             shared,
             main_thread: Some(main_thread),
             usb_thread: Some(usb_thread),
+            anim_thread: Mutex::new(None),
         }
     }
 
@@ -252,10 +261,46 @@ impl SmxManager {
 
     /// Sets panel LED colors for both pads.
     pub fn set_lights(&self, light_data: &[u8]) {
+        // Pause auto-animation when lights are set directly.
+        if self.shared.anim_running.load(Ordering::Relaxed) {
+            *self.shared.anim_pause_until.lock().unwrap() =
+                Some(Instant::now() + Duration::from_secs_f64(crate::protocol::ANIMATION_PAUSE_DURATION));
+        }
         let mut state = self.shared.state.lock().unwrap();
         set_lights_inner(&mut state, light_data);
         drop(state);
         self.shared.wake.notify_all();
+    }
+
+    /// Loads a GIF animation for a pad.
+    pub fn load_animation(
+        &self,
+        gif_data: &[u8],
+        pad: usize,
+        lights_type: crate::lights::LightsType,
+    ) -> Result<(), &'static str> {
+        let mut anim = self.shared.animation.lock().unwrap();
+        anim.load(gif_data, pad, lights_type)
+    }
+
+    /// Enables or disables automatic animation playback at 30 FPS.
+    pub fn set_animation_auto(&self, enable: bool) {
+        if enable {
+            if self.shared.anim_running.load(Ordering::Relaxed) {
+                return; // Already running.
+            }
+            self.shared.anim_running.store(true, Ordering::Relaxed);
+            let shared = Arc::clone(&self.shared);
+            *self.anim_thread.lock().unwrap() = Some(thread::spawn(move || animation_thread_loop(shared)));
+        } else {
+            if !self.shared.anim_running.load(Ordering::Relaxed) {
+                return; // Not running.
+            }
+            self.shared.anim_running.store(false, Ordering::Relaxed);
+            if let Some(t) = self.anim_thread.lock().unwrap().take() {
+                let _ = t.join();
+            }
+        }
     }
 
     /// Forces recalibration on a pad.
@@ -311,7 +356,11 @@ impl SmxManager {
 impl Drop for SmxManager {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Relaxed);
+        self.shared.anim_running.store(false, Ordering::Relaxed);
         self.shared.wake.notify_all();
+        if let Some(t) = self.anim_thread.lock().unwrap().take() {
+            let _ = t.join();
+        }
         if let Some(t) = self.main_thread.take() {
             let _ = t.join();
         }
@@ -347,6 +396,53 @@ fn usb_polling_loop(shared: Arc<ManagerShared>) {
         }
         let us = shared.usb_polling_sleep_us.load(Ordering::Relaxed).max(100);
         thread::sleep(Duration::from_micros(us as u64));
+    }
+}
+
+fn animation_thread_loop(shared: Arc<ManagerShared>) {
+    let frame_duration = Duration::from_millis(33); // ~30 FPS
+
+    while shared.anim_running.load(Ordering::Relaxed) && !shared.shutdown.load(Ordering::Relaxed) {
+        let frame_start = Instant::now();
+
+        // Check if paused (direct set_lights was called).
+        let paused = shared.anim_pause_until.lock().unwrap()
+            .is_some_and(|until| Instant::now() < until);
+        if paused {
+            thread::sleep(frame_duration);
+            continue;
+        }
+
+        // Get input states and build frame.
+        let (input_states, has_animation) = {
+            let state = shared.state.lock().unwrap();
+            let inputs = [state.devices[0].input_state(), state.devices[1].input_state()];
+            let has_anim = state.devices[0].is_connected() || state.devices[1].is_connected();
+            (inputs, has_anim)
+        };
+
+        if !has_animation {
+            thread::sleep(frame_duration);
+            continue;
+        }
+
+        let frame = {
+            let mut anim = shared.animation.lock().unwrap();
+            anim.build_frame(input_states)
+        };
+
+        // Send lights (bypasses the pause logic by going directly to set_lights_inner).
+        {
+            let mut state = shared.state.lock().unwrap();
+            set_lights_inner(&mut state, &frame);
+        }
+        shared.wake.notify_all();
+
+        // Sleep for remainder of frame.
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_duration {
+            thread::sleep(frame_duration - elapsed);
+        }
     }
 }
 
