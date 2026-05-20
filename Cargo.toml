@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Rust SDK for StepManiaX dance pad controllers"
 license = "MIT"
+repository = "https://github.com/fchorney/rustmaniax-sdk"
+homepage = "https://github.com/fchorney/rustmaniax-sdk"
+documentation = "https://docs.rs/rustmaniax-sdk"
 
 [dependencies]
 hidapi = { version = "2.6.5", default-features = false }
