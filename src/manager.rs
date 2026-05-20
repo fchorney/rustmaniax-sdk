@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::connection::{self, HidEnumerator, HidapiEnumerator, PollHandle};
 use crate::device::{SmxDevice, SmxEvent, SmxInfo};
 use crate::protocol::{
-    BYTES_PER_PAD_16, BYTES_PER_PAD_25, ENUMERATION_INTERVAL_SECONDS, LED_COLOR_SCALE,
+    BYTES_PER_PAD_16, BYTES_PER_PAD_25, ENUMERATION_INTERVAL_SECONDS,
     LEGACY_LIGHTS_PAYLOAD_SIZE, LIGHTS_FRAME_INTERVAL, LIGHTS_LEGACY_COMMAND_DELAY, NUM_PANELS,
     PANEL_TEST_REFRESH_SECONDS, PLATFORM_STRIP_LEDS, SERIAL_SIZE, SMX_USB_PRODUCT_ID,
     SMX_USB_VENDOR_ID,
@@ -23,7 +23,8 @@ pub enum PanelTestMode {
 /// A scheduled lights command for both pads.
 struct PendingLightsCommand {
     send_at: Instant,
-    pad_command: [Vec<u8>; 2],
+    pad_command: [[u8; 256]; 2], // max command size is 245 bytes
+    pad_command_len: [usize; 2],
 }
 
 /// Manages the lifecycle of all connected StepManiaX devices.
@@ -681,10 +682,7 @@ fn update_panel_test_mode(state: &mut ManagerState) {
 
 // ─── Lights ──────────────────────────────────────────────────────────────────
 
-/// Precomputed color scaling table.
-fn scale_color(c: u8) -> u8 {
-    (c as f32 * LED_COLOR_SCALE) as u8
-}
+
 
 #[allow(clippy::needless_range_loop)]
 fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
@@ -700,46 +698,56 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
         return;
     };
 
-    // Build 3 commands per pad: '4' (inner 3x3), '2' (top half), '3' (bottom half).
-    let mut cmds: [[Vec<u8>; 2]; 3] = Default::default();
+    // Build 3 commands per pad into stack buffers.
+    // cmd '4' (inner 3x3): max 1 + 9*9*3 + 1 = 245 bytes
+    // cmd '2' (top half):  max 1 + 9*8*3 + 1 = 218 bytes
+    // cmd '3' (bottom half): same as '2'
+    let mut cmds = [[[0u8; 256]; 2]; 3];
+    let mut cmd_lens = [[0usize; 2]; 3];
 
     for pad in 0..2 {
         let pad_data = &light_data[pad * bytes_per_pad..(pad + 1) * bytes_per_pad];
 
-        cmds[0][pad] = Vec::with_capacity(1 + NUM_PANELS * 9 * 3 + 1);
-        cmds[1][pad] = Vec::with_capacity(1 + NUM_PANELS * 8 * 3 + 1);
-        cmds[2][pad] = Vec::with_capacity(1 + NUM_PANELS * 8 * 3 + 1);
+        let mut len4 = 0usize;
+        let mut len2 = 0usize;
+        let mut len3 = 0usize;
 
-        cmds[0][pad].push(b'4');
-        cmds[1][pad].push(b'2');
-        cmds[2][pad].push(b'3');
+        cmds[0][pad][len4] = b'4'; len4 += 1;
+        cmds[1][pad][len2] = b'2'; len2 += 1;
+        cmds[2][pad][len3] = b'3'; len3 += 1;
 
         let mut input_idx = 0;
         for _panel in 0..NUM_PANELS {
-            // Outer 4x4: top 2 rows → cmd '2', bottom 2 rows → cmd '3'.
             for byte_idx in 0..4 * 4 * 3 {
-                let color = scale_color(pad_data[input_idx]);
+                let color = crate::lights::scale_color(pad_data[input_idx]);
                 input_idx += 1;
                 if byte_idx < 4 * 2 * 3 {
-                    cmds[1][pad].push(color);
+                    cmds[1][pad][len2] = color; len2 += 1;
                 } else {
-                    cmds[2][pad].push(color);
+                    cmds[2][pad][len3] = color; len3 += 1;
                 }
             }
-            // Inner 3x3 → cmd '4'.
             if bytes_per_pad == BYTES_PER_PAD_25 {
                 for _ in 0..3 * 3 * 3 {
-                    cmds[0][pad].push(scale_color(pad_data[input_idx]));
+                    cmds[0][pad][len4] = crate::lights::scale_color(pad_data[input_idx]);
+                    len4 += 1;
                     input_idx += 1;
                 }
             } else {
-                cmds[0][pad].extend_from_slice(&[0u8; 3 * 3 * 3]);
+                for _ in 0..3 * 3 * 3 {
+                    cmds[0][pad][len4] = 0;
+                    len4 += 1;
+                }
             }
         }
 
-        cmds[0][pad].push(b'\n');
-        cmds[1][pad].push(b'\n');
-        cmds[2][pad].push(b'\n');
+        cmds[0][pad][len4] = b'\n'; len4 += 1;
+        cmds[1][pad][len2] = b'\n'; len2 += 1;
+        cmds[2][pad][len3] = b'\n'; len3 += 1;
+
+        cmd_lens[0][pad] = len4;
+        cmd_lens[1][pad] = len2;
+        cmd_lens[2][pad] = len3;
     }
 
     // Rate limiting: replace last 3 pending if full, otherwise append.
@@ -748,7 +756,6 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
     if state.pending_lights.len() < 3 {
         let send_at = state.delay_lights_until.unwrap_or(now).max(now);
 
-        // Check firmware version for timing.
         let mut is_v4 = false;
         let mut any_connected = false;
         let mut has_config = [false; 2];
@@ -779,7 +786,8 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
         for time in times {
             state.pending_lights.push(PendingLightsCommand {
                 send_at: time,
-                pad_command: [Vec::new(), Vec::new()],
+                pad_command: [[0; 256]; 2],
+                pad_command_len: [0; 2],
             });
         }
 
@@ -790,10 +798,16 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
             }
             let master_v = configs[pad].map_or(0, |c| c.master_version);
             if master_v >= 4 {
-                state.pending_lights[base].pad_command[pad] = cmds[0][pad].clone();
+                state.pending_lights[base].pad_command[pad][..cmd_lens[0][pad]]
+                    .copy_from_slice(&cmds[0][pad][..cmd_lens[0][pad]]);
+                state.pending_lights[base].pad_command_len[pad] = cmd_lens[0][pad];
             }
-            state.pending_lights[base + 1].pad_command[pad] = cmds[1][pad].clone();
-            state.pending_lights[base + 2].pad_command[pad] = cmds[2][pad].clone();
+            state.pending_lights[base + 1].pad_command[pad][..cmd_lens[1][pad]]
+                .copy_from_slice(&cmds[1][pad][..cmd_lens[1][pad]]);
+            state.pending_lights[base + 1].pad_command_len[pad] = cmd_lens[1][pad];
+            state.pending_lights[base + 2].pad_command[pad][..cmd_lens[2][pad]]
+                .copy_from_slice(&cmds[2][pad][..cmd_lens[2][pad]]);
+            state.pending_lights[base + 2].pad_command_len[pad] = cmd_lens[2][pad];
         }
     } else {
         // Replace last 3.
@@ -801,12 +815,18 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
         for pad in 0..2 {
             let Some(cfg) = state.devices[pad].get_config() else { continue };
             if cfg.master_version >= 4 {
-                state.pending_lights[base].pad_command[pad] = cmds[0][pad].clone();
+                state.pending_lights[base].pad_command[pad][..cmd_lens[0][pad]]
+                    .copy_from_slice(&cmds[0][pad][..cmd_lens[0][pad]]);
+                state.pending_lights[base].pad_command_len[pad] = cmd_lens[0][pad];
             } else {
-                state.pending_lights[base].pad_command[pad].clear();
+                state.pending_lights[base].pad_command_len[pad] = 0;
             }
-            state.pending_lights[base + 1].pad_command[pad] = cmds[1][pad].clone();
-            state.pending_lights[base + 2].pad_command[pad] = cmds[2][pad].clone();
+            state.pending_lights[base + 1].pad_command[pad][..cmd_lens[1][pad]]
+                .copy_from_slice(&cmds[1][pad][..cmd_lens[1][pad]]);
+            state.pending_lights[base + 1].pad_command_len[pad] = cmd_lens[1][pad];
+            state.pending_lights[base + 2].pad_command[pad][..cmd_lens[2][pad]]
+                .copy_from_slice(&cmds[2][pad][..cmd_lens[2][pad]]);
+            state.pending_lights[base + 2].pad_command_len[pad] = cmd_lens[2][pad];
         }
     }
 }
@@ -821,10 +841,10 @@ fn send_pending_lights(state: &mut ManagerState) {
         }
         let cmd = &state.pending_lights[consumed];
         for pad in 0..2 {
-            if !cmd.pad_command[pad].is_empty()
+            if cmd.pad_command_len[pad] > 0
                 && let Some(conn) = state.devices[pad].connection_mut()
             {
-                conn.send_command(&cmd.pad_command[pad], None);
+                conn.send_command(&cmd.pad_command[pad][..cmd.pad_command_len[pad]], None);
             }
         }
         consumed += 1;

@@ -55,11 +55,11 @@ cargo clippy
 ## Running the Sample
 
 ```bash
-cargo run --bin smx-sample
-cargo run --bin smx-sample -- --all-packets
-cargo run --bin smx-sample -- --calibrated
-cargo run --bin smx-sample -- --test-mode
-cargo run --bin smx-sample -- 50 500 --all-packets
+cargo run --features sample --bin smx-sample
+cargo run --features sample --bin smx-sample -- --all-packets
+cargo run --features sample --bin smx-sample -- --calibrated
+cargo run --features sample --bin smx-sample -- --test-mode
+cargo run --features sample --bin smx-sample -- 50 500 --all-packets
 ```
 
 Flags:

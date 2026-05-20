@@ -567,7 +567,6 @@ impl HidDevice for SharedHidDevice {
 }
 
 // SharedHidDevice contains Arc<Mutex<..>> which is Send, so this is safe.
-unsafe impl Send for SharedHidDevice {}
 
 #[cfg(test)]
 mod tests {

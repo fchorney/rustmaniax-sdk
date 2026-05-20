@@ -66,7 +66,6 @@ impl HidDevice for RecordingDevice {
 }
 
 // RecordingDevice is Send because File is Send and the inner device is Send.
-unsafe impl Send for RecordingDevice {}
 
 /// Wraps a HidEnumerator and records traffic for every opened device.
 pub struct RecordingEnumerator {
@@ -116,7 +115,8 @@ impl HidEnumerator for RecordingEnumerator {
             Ok(rec) => Ok(Box::new(rec)),
             Err(e) => {
                 log::error!("Failed to create capture file {}: {e}", file_path.display());
-                // Fall back to opening without recording.
+                // Return the already-opened device without recording.
+                // RecordingDevice::new consumed `device` on failure, so we must re-open.
                 self.inner.open(path)
             }
         }

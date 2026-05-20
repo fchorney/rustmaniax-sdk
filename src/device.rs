@@ -603,51 +603,58 @@ fn convert_to_old_config(new_config: &SmxConfig, old_data: &mut Vec<u8>) {
         old_data.resize(128, 0xFF);
     }
 
-    // Ensure we have enough space for the full struct.
     if old_data.len() < size_of::<OldSmxConfig>() {
         old_data.resize(size_of::<OldSmxConfig>(), 0);
     }
 
-    let old: &mut OldSmxConfig = unsafe { &mut *(old_data.as_mut_ptr().cast()) };
+    // Write fields using raw pointer writes to avoid UB on packed struct references.
+    let ptr = old_data.as_mut_ptr().cast::<OldSmxConfig>();
+    unsafe {
+        macro_rules! write_field {
+            ($field:ident, $val:expr) => {
+                std::ptr::addr_of_mut!((*ptr).$field).write_unaligned($val)
+            };
+        }
 
-    old.master_debounce_ms = new_config.debounce_nodelay_ms;
+        write_field!(master_debounce_ms, new_config.debounce_nodelay_ms);
 
-    old.panel_threshold_7_low = new_config.panel_settings[7].load_cell_low_threshold;
-    old.panel_threshold_7_high = new_config.panel_settings[7].load_cell_high_threshold;
-    old.panel_threshold_4_low = new_config.panel_settings[4].load_cell_low_threshold;
-    old.panel_threshold_4_high = new_config.panel_settings[4].load_cell_high_threshold;
-    old.panel_threshold_2_low = new_config.panel_settings[2].load_cell_low_threshold;
-    old.panel_threshold_2_high = new_config.panel_settings[2].load_cell_high_threshold;
+        write_field!(panel_threshold_7_low, new_config.panel_settings[7].load_cell_low_threshold);
+        write_field!(panel_threshold_7_high, new_config.panel_settings[7].load_cell_high_threshold);
+        write_field!(panel_threshold_4_low, new_config.panel_settings[4].load_cell_low_threshold);
+        write_field!(panel_threshold_4_high, new_config.panel_settings[4].load_cell_high_threshold);
+        write_field!(panel_threshold_2_low, new_config.panel_settings[2].load_cell_low_threshold);
+        write_field!(panel_threshold_2_high, new_config.panel_settings[2].load_cell_high_threshold);
 
-    old.panel_debounce_us = new_config.panel_debounce_us;
-    old.auto_calibration_max_deviation = new_config.auto_calibration_max_deviation;
-    old.bad_sensor_minimum_delay_seconds = new_config.bad_sensor_minimum_delay_seconds;
-    old.auto_calibration_averages_per_update = new_config.auto_calibration_averages_per_update;
+        write_field!(panel_debounce_us, new_config.panel_debounce_us);
+        write_field!(auto_calibration_max_deviation, new_config.auto_calibration_max_deviation);
+        write_field!(bad_sensor_minimum_delay_seconds, new_config.bad_sensor_minimum_delay_seconds);
+        write_field!(auto_calibration_averages_per_update, new_config.auto_calibration_averages_per_update);
 
-    old.panel_threshold_1_low = new_config.panel_settings[1].load_cell_low_threshold;
-    old.panel_threshold_1_high = new_config.panel_settings[1].load_cell_high_threshold;
+        write_field!(panel_threshold_1_low, new_config.panel_settings[1].load_cell_low_threshold);
+        write_field!(panel_threshold_1_high, new_config.panel_settings[1].load_cell_high_threshold);
 
-    old.enabled_sensors = new_config.enabled_sensors;
-    old.auto_lights_timeout = new_config.auto_lights_timeout;
-    old.step_color = new_config.step_color;
-    old.panel_rotation = new_config.panel_rotation;
-    old.auto_calibration_samples_per_average = new_config.auto_calibration_samples_per_average;
+        write_field!(enabled_sensors, new_config.enabled_sensors);
+        write_field!(auto_lights_timeout, new_config.auto_lights_timeout);
+        write_field!(step_color, new_config.step_color);
+        write_field!(panel_rotation, new_config.panel_rotation);
+        write_field!(auto_calibration_samples_per_average, new_config.auto_calibration_samples_per_average);
 
-    old.master_version = new_config.master_version;
-    old.config_version = new_config.config_version;
+        write_field!(master_version, new_config.master_version);
+        write_field!(config_version, new_config.config_version);
 
-    old.panel_threshold_0_low = new_config.panel_settings[0].load_cell_low_threshold;
-    old.panel_threshold_0_high = new_config.panel_settings[0].load_cell_high_threshold;
-    old.panel_threshold_3_low = new_config.panel_settings[3].load_cell_low_threshold;
-    old.panel_threshold_3_high = new_config.panel_settings[3].load_cell_high_threshold;
-    old.panel_threshold_5_low = new_config.panel_settings[5].load_cell_low_threshold;
-    old.panel_threshold_5_high = new_config.panel_settings[5].load_cell_high_threshold;
-    old.panel_threshold_6_low = new_config.panel_settings[6].load_cell_low_threshold;
-    old.panel_threshold_6_high = new_config.panel_settings[6].load_cell_high_threshold;
-    old.panel_threshold_8_low = new_config.panel_settings[8].load_cell_low_threshold;
-    old.panel_threshold_8_high = new_config.panel_settings[8].load_cell_high_threshold;
+        write_field!(panel_threshold_0_low, new_config.panel_settings[0].load_cell_low_threshold);
+        write_field!(panel_threshold_0_high, new_config.panel_settings[0].load_cell_high_threshold);
+        write_field!(panel_threshold_3_low, new_config.panel_settings[3].load_cell_low_threshold);
+        write_field!(panel_threshold_3_high, new_config.panel_settings[3].load_cell_high_threshold);
+        write_field!(panel_threshold_5_low, new_config.panel_settings[5].load_cell_low_threshold);
+        write_field!(panel_threshold_5_high, new_config.panel_settings[5].load_cell_high_threshold);
+        write_field!(panel_threshold_6_low, new_config.panel_settings[6].load_cell_low_threshold);
+        write_field!(panel_threshold_6_high, new_config.panel_settings[6].load_cell_high_threshold);
+        write_field!(panel_threshold_8_low, new_config.panel_settings[8].load_cell_low_threshold);
+        write_field!(panel_threshold_8_high, new_config.panel_settings[8].load_cell_high_threshold);
 
-    old.debounce_delay_ms = new_config.debounce_delay_ms;
+        write_field!(debounce_delay_ms, new_config.debounce_delay_ms);
+    }
 }
 
 #[cfg(test)]
@@ -698,11 +705,11 @@ mod tests {
     fn convert_version_0xff_copies_base_only() {
         let mut old = vec![0u8; size_of::<OldSmxConfig>()];
         // Set config_version to 0xFF (uninitialized).
-        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
-        old_struct.config_version = 0xFF;
-        old_struct.master_debounce_ms = 500;
-        old_struct.panel_threshold_7_low = 77;
-        old_struct.panel_threshold_0_low = 99; // v2 field — should NOT be copied
+        let old_ptr = old.as_mut_ptr().cast::<OldSmxConfig>();
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).config_version).write_unaligned(0xFF) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).master_debounce_ms).write_unaligned(500) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_7_low).write_unaligned(77) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_0_low).write_unaligned(99) }; // v2 field — should NOT be copied
 
         let mut config = SmxConfig::zeroed();
         convert_to_new_config(&old, &mut config);
@@ -722,11 +729,11 @@ mod tests {
     #[test]
     fn convert_version_1_skips_v2_panels() {
         let mut old = vec![0u8; size_of::<OldSmxConfig>()];
-        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
-        old_struct.config_version = 1;
-        old_struct.master_version = 2;
-        old_struct.panel_threshold_7_low = 50;
-        old_struct.panel_threshold_0_low = 88; // v2 field
+        let old_ptr = old.as_mut_ptr().cast::<OldSmxConfig>();
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).config_version).write_unaligned(1) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).master_version).write_unaligned(2) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_7_low).write_unaligned(50) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_0_low).write_unaligned(88) }; // v2 field
 
         let mut config = SmxConfig::zeroed();
         convert_to_new_config(&old, &mut config);
@@ -745,15 +752,15 @@ mod tests {
     #[test]
     fn convert_version_2_copies_all_panels_but_not_debounce_delay() {
         let mut old = vec![0u8; size_of::<OldSmxConfig>()];
-        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
-        old_struct.config_version = 2;
-        old_struct.master_version = 3;
-        old_struct.panel_threshold_0_low = 10;
-        old_struct.panel_threshold_3_low = 30;
-        old_struct.panel_threshold_5_low = 50;
-        old_struct.panel_threshold_6_low = 60;
-        old_struct.panel_threshold_8_low = 80;
-        old_struct.debounce_delay_ms = 999; // v3 field
+        let old_ptr = old.as_mut_ptr().cast::<OldSmxConfig>();
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).config_version).write_unaligned(2) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).master_version).write_unaligned(3) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_0_low).write_unaligned(10) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_3_low).write_unaligned(30) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_5_low).write_unaligned(50) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_6_low).write_unaligned(60) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_8_low).write_unaligned(80) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).debounce_delay_ms).write_unaligned(999) }; // v3 field
 
         let mut config = SmxConfig::zeroed();
         convert_to_new_config(&old, &mut config);
@@ -770,11 +777,11 @@ mod tests {
     #[test]
     fn convert_version_3_copies_debounce_delay() {
         let mut old = vec![0u8; size_of::<OldSmxConfig>()];
-        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
-        old_struct.config_version = 3;
-        old_struct.master_version = 4;
-        old_struct.debounce_delay_ms = 250;
-        old_struct.panel_threshold_0_low = 11;
+        let old_ptr = old.as_mut_ptr().cast::<OldSmxConfig>();
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).config_version).write_unaligned(3) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).master_version).write_unaligned(4) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).debounce_delay_ms).write_unaligned(250) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).panel_threshold_0_low).write_unaligned(11) };
 
         let mut config = SmxConfig::zeroed();
         convert_to_new_config(&old, &mut config);
@@ -787,12 +794,12 @@ mod tests {
     #[test]
     fn convert_enabled_sensors_and_step_color() {
         let mut old = vec![0u8; size_of::<OldSmxConfig>()];
-        let old_struct: &mut OldSmxConfig = unsafe { &mut *(old.as_mut_ptr().cast()) };
-        old_struct.config_version = 1;
-        old_struct.master_version = 1;
-        old_struct.enabled_sensors = [0x1F, 0x0A, 0x00, 0xFF, 0x55];
-        old_struct.step_color[0] = 100;
-        old_struct.step_color[26] = 200;
+        let old_ptr = old.as_mut_ptr().cast::<OldSmxConfig>();
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).config_version).write_unaligned(1) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).master_version).write_unaligned(1) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).enabled_sensors).write_unaligned([0x1F, 0x0A, 0x00, 0xFF, 0x55]) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).step_color[0]).write_unaligned(100) };
+        unsafe { std::ptr::addr_of_mut!((*old_ptr).step_color[26]).write_unaligned(200) };
 
         let mut config = SmxConfig::zeroed();
         convert_to_new_config(&old, &mut config);

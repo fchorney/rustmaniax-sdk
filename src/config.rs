@@ -48,3 +48,6 @@ bitflags::bitflags! {
         const FSR = 1 << 1;
     }
 }
+
+// Compile-time assertion: SmxConfig must be exactly 250 bytes (wire format).
+const _: () = assert!(std::mem::size_of::<SmxConfig>() == 250);
