@@ -355,9 +355,8 @@ impl SmxDevice {
         };
 
         self.sending_config = true;
-        // We can't capture `&mut self` in the callback, so we just clear the flag
-        // when we process the next update cycle. The C++ version uses a raw pointer
-        // capture which we avoid here.
+        // The C++ version uses a callback to clear `sending_config` asynchronously,
+        // but since we send synchronously here, we just clear it immediately.
         conn.send_command(&cmd_data, None);
         self.send_config = false;
         self.sending_config = false;

@@ -49,5 +49,5 @@ pub use connection::{CommandCallback, HidDevice, HidDeviceInfo, HidEnumerator, H
 // Recording (for debugging/capture).
 pub use recorder::{RecordingDevice, RecordingEnumerator};
 
-// Protocol constants (useful for low-level inspection/testing).
+// Protocol constant (useful for low-level inspection/testing).
 pub use protocol::HID_REPORT_COMMAND;

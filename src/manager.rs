@@ -72,7 +72,7 @@ struct ManagerState {
     last_input_state: [u16; 2],
     always_fire_input: bool,
 
-    // Paths that failed to open (cleared on next successful enumeration refresh).
+    // Paths that failed to open (removed when the device disappears from enumeration).
     failed_paths: Vec<String>,
 }
 
@@ -859,7 +859,7 @@ fn send_pending_lights(state: &mut ManagerState) {
 
 fn generate_serial() -> [u8; SERIAL_SIZE] {
     let mut serial = [0u8; SERIAL_SIZE];
-    // Use system time + thread ID as entropy source for serial assignment.
+    // Use system time as entropy source for serial assignment.
     // This doesn't need to be cryptographically secure — just unique per device.
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

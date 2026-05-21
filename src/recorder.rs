@@ -129,7 +129,7 @@ fn chrono_timestamp() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = now.as_secs();
-    // Simple timestamp: YYYY-MM-DD_HH-MM-SS (approximate from epoch).
-    // For a proper implementation you'd use chrono, but this avoids the dependency.
+    // Raw epoch seconds as a simple unique directory name.
+    // For human-readable timestamps you'd use chrono, but this avoids the dependency.
     format!("{secs}")
 }
