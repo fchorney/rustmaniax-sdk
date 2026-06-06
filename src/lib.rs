@@ -49,9 +49,6 @@ pub use connection::{CommandCallback, HidDevice, HidDeviceInfo, HidEnumerator, H
 // Recording (for debugging/capture).
 pub use recorder::{RecordingDevice, RecordingEnumerator};
 
-// Protocol constant (useful for low-level inspection/testing).
-pub use protocol::HID_REPORT_COMMAND;
-
 // Hardware-shape constants — stable facts about the pads that consumers need to
 // size buffers, enumerate devices, or read serials without hardcoding them.
 // (Wire/protocol internals — packet flags, timeouts, report IDs — stay private.)

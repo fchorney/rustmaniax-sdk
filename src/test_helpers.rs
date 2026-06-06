@@ -6,10 +6,14 @@ use std::sync::{Arc, Mutex};
 use crate::connection::{HidDevice, HidDeviceInfo, HidEnumerator};
 use crate::error::SmxError;
 use crate::protocol::{
-    HID_REPORT_COMMAND, HID_REPORT_DATA, HID_REPORT_INPUT_STATE, PACKET_FLAG_DEVICE_INFO,
-    PACKET_FLAG_END_OF_COMMAND, PACKET_FLAG_HOST_CMD_FINISHED, PACKET_FLAG_START_OF_COMMAND,
-    SERIAL_SIZE,
+    HID_REPORT_DATA, HID_REPORT_INPUT_STATE, PACKET_FLAG_DEVICE_INFO, PACKET_FLAG_END_OF_COMMAND,
+    PACKET_FLAG_HOST_CMD_FINISHED, PACKET_FLAG_START_OF_COMMAND, SERIAL_SIZE,
 };
+
+// Re-exported for integration/replay tests that inspect raw HID writes. The
+// wire constant lives with the test-support surface rather than the main public
+// API (which only exposes stable hardware-shape constants).
+pub use crate::protocol::HID_REPORT_COMMAND;
 
 /// Thread-safe fake HID device for testing.
 /// Supports auto-responding to commands (for full-stack manager tests).

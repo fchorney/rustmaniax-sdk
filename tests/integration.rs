@@ -1,7 +1,7 @@
 //! Full-stack integration tests exercising SmxManager with fake HID devices.
 
 use rustmaniax_sdk::{PanelTestMode, SmxEvent, SmxManager};
-use rustmaniax_sdk::HID_REPORT_COMMAND;
+use rustmaniax_sdk::test_helpers::HID_REPORT_COMMAND;
 use rustmaniax_sdk::test_helpers::{wait_for, FakeDevice, FakeEnumerator};
 
 use std::sync::{Arc, Mutex};
