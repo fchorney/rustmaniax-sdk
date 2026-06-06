@@ -306,25 +306,6 @@ impl SmxManager {
         self.shared.wake.notify_all();
     }
 
-    /// Light every panel of each pad a single solid RGB colour, or turn a pad's
-    /// panels off with `None`. Indexed by slot: `colors[0]` = pad slot 0 (P1),
-    /// `colors[1]` = slot 1 (P2). Useful for a static indicator — e.g. marking
-    /// which physical pad is assigned to which player. Like [`Self::set_lights`],
-    /// this pauses any running animation; re-send periodically to hold the colour.
-    pub fn set_solid_lights(&self, colors: [Option<[u8; 3]>; 2]) {
-        // A full 25-LED-per-pad frame (9 panels × 25 LEDs × 3). Firmware on 16-LED
-        // pads simply ignores the inner-ring bytes, so one buffer covers both.
-        let mut buf = vec![0u8; 2 * BYTES_PER_PAD_25];
-        for (pad, color) in colors.iter().enumerate() {
-            let Some(rgb) = color else { continue };
-            let base = pad * BYTES_PER_PAD_25;
-            for led in buf[base..base + BYTES_PER_PAD_25].chunks_exact_mut(3) {
-                led.copy_from_slice(rgb);
-            }
-        }
-        self.set_lights(&buf);
-    }
-
     /// Loads a GIF animation for a pad.
     pub fn load_animation(
         &self,

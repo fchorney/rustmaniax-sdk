@@ -7,7 +7,7 @@ This is a port of [stepmaniax-sdk-mp](https://github.com/fchorney/stepmaniax-sdk
 ## Table of Contents
 
 - [Quick Start](#quick-start)
-- [Player Assignment & Indicator Lights](#player-assignment--indicator-lights)
+- [Player Assignment](#player-assignment)
 - [Dependencies](#dependencies)
 - [Building](#building)
 - [Running the Sample](#running-the-sample)
@@ -36,7 +36,7 @@ let mgr = SmxManager::start(|event| match event {
 }).unwrap();
 ```
 
-## Player Assignment & Indicator Lights
+## Player Assignment
 
 By default the two pad slots are ordered by each pad's hardware **P1/P2 jumper**
 (slot 0 = P1, slot 1 = P2). When two pads share a jumper — or are installed on the
@@ -52,13 +52,10 @@ mgr.set_player_assignment(Some(p1_serial), Some(p2_serial));
 mgr.set_player_assignment(None, None);
 ```
 
-To show the user which physical pad is which, light each pad a solid color by slot
-(`None` = off). Re-send periodically to hold the color:
-
-```rust
-// P1 (slot 0) blue, P2 (slot 1) red.
-mgr.set_solid_lights([Some([0, 80, 255]), Some([255, 40, 40])]);
-```
+For lighting, use `set_lights` with a `2 * BYTES_PER_PAD_25`-byte buffer (the
+hardware-shape constants — `NUM_PANELS`, `BYTES_PER_PAD_16/25`, `LEDS_PER_PANEL_*`,
+`SMX_USB_VENDOR_ID`/`PRODUCT_ID`, `SERIAL_SIZE` — are re-exported from the crate
+root so callers don't hardcode sizes).
 
 ## Dependencies
 
