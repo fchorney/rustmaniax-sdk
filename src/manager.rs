@@ -74,6 +74,12 @@ struct ManagerState {
 
     // Paths that failed to open (removed when the device disappears from enumeration).
     failed_paths: Vec<String>,
+
+    // Optional user-pinned serial->slot assignment, index = desired slot
+    // (0 = P1, 1 = P2). When both connected pads' serials are covered by this,
+    // `correct_device_order` orders strictly by it (overriding the P1/P2 jumper);
+    // otherwise it falls back to jumper-based ordering. `[None, None]` = no override.
+    player_assignment: [Option<String>; 2],
 }
 
 impl SmxManager {
@@ -123,6 +129,7 @@ impl SmxManager {
             last_input_state: [0; 2],
             always_fire_input: false,
             failed_paths: Vec::new(),
+            player_assignment: [None, None],
         };
 
         let shared = Arc::new(ManagerShared {
@@ -220,6 +227,32 @@ impl SmxManager {
                 conn.set_always_fire_input(always_fire);
             }
         }
+    }
+
+    /// Pin pad serials to player slots (`p1_serial` -> slot 0, `p2_serial` -> slot 1),
+    /// overriding the hardware P1/P2 jumper when ordering the two slots.
+    ///
+    /// The override only takes effect when both connected pads' serials are the two
+    /// given serials; otherwise (no override, a single pad, or an unrecognized serial)
+    /// ordering falls back to the jumper. Passing `None, None` clears the override.
+    ///
+    /// Applies immediately: if the two connected pads are in the wrong slots they are
+    /// swapped now, and `Connected`/`ConfigUpdated` events are fired for the affected
+    /// slots so listeners re-read per-slot identity — no reconnect required.
+    pub fn set_player_assignment(&self, p1_serial: Option<String>, p2_serial: Option<String>) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.player_assignment = [p1_serial, p2_serial];
+        if correct_device_order(&mut state) {
+            for i in 0..2 {
+                if state.devices[i].is_connected() {
+                    let info = state.devices[i].get_info();
+                    (state.callback)(SmxEvent::Connected { pad: i, info });
+                    (state.callback)(SmxEvent::ConfigUpdated { pad: i });
+                }
+            }
+        }
+        drop(state);
+        self.shared.wake.notify_all();
     }
 
     /// Assigns random serial numbers to devices that don't have one.
@@ -621,13 +654,20 @@ fn correct_device_order(state: &mut ManagerState) -> bool {
     let info0 = state.devices[0].get_info();
     let info1 = state.devices[1].get_info();
 
-    // If both connected with same player setting, can't determine order.
-    if info0.connected && info1.connected && info0.is_player2 == info1.is_player2 {
-        return false;
-    }
-
-    let should_swap = (info0.connected && info0.is_player2)
-        || (info1.connected && !info1.is_player2);
+    let should_swap = match override_should_swap(&state.player_assignment, &info0, &info1) {
+        // User-pinned serial->slot assignment covers both pads: order by it,
+        // ignoring the jumper (this is the only path that can order two pads
+        // that share a jumper).
+        Some(swap) => swap,
+        // No applicable override: fall back to jumper-based ordering.
+        None => {
+            // If both connected with same player setting, can't determine order.
+            if info0.connected && info1.connected && info0.is_player2 == info1.is_player2 {
+                return false;
+            }
+            (info0.connected && info0.is_player2) || (info1.connected && !info1.is_player2)
+        }
+    };
 
     if should_swap {
         state.devices.swap(0, 1);
@@ -637,6 +677,35 @@ fn correct_device_order(state: &mut ManagerState) -> bool {
         state.devices[1].set_pad_index(1);
     }
     should_swap
+}
+
+/// Decide ordering from a user-pinned serial->slot assignment.
+///
+/// Returns `Some(should_swap)` only when an assignment is set, both pads are
+/// connected, and both their serials are exactly the two assigned serials — the
+/// override then forces that order regardless of jumper. Returns `None` (defer to
+/// jumper ordering) when there is no assignment, only one pad is connected, or a
+/// connected pad's serial isn't part of the assignment.
+fn override_should_swap(
+    assignment: &[Option<String>; 2],
+    info0: &SmxInfo,
+    info1: &SmxInfo,
+) -> Option<bool> {
+    let (Some(p1), Some(p2)) = (&assignment[0], &assignment[1]) else {
+        return None;
+    };
+    // Lone pad keeps jumper behavior; the override only orders a known pair.
+    if !info0.connected || !info1.connected {
+        return None;
+    }
+    let (s0, s1) = (&info0.serial, &info1.serial);
+    if s0 == p1 && s1 == p2 {
+        Some(false) // already in the desired order
+    } else if s0 == p2 && s1 == p1 {
+        Some(true) // pads are swapped relative to the assignment
+    } else {
+        None // a serial isn't covered by the assignment -> jumper fallback
+    }
 }
 
 // ─── Panel Test Mode ─────────────────────────────────────────────────────────
@@ -874,4 +943,92 @@ fn generate_serial() -> [u8; SERIAL_SIZE] {
         *byte = state as u8;
     }
     serial
+}
+
+#[cfg(test)]
+mod tests {
+    use super::override_should_swap;
+    use crate::device::SmxInfo;
+
+    fn info(connected: bool, is_player2: bool, serial: &str) -> SmxInfo {
+        SmxInfo {
+            connected,
+            is_player2,
+            has_serial_number: true,
+            serial: serial.to_string(),
+            firmware_version: 5,
+        }
+    }
+
+    fn assignment(p1: &str, p2: &str) -> [Option<String>; 2] {
+        [Some(p1.to_string()), Some(p2.to_string())]
+    }
+
+    #[test]
+    fn no_override_defers_to_jumper() {
+        let none: [Option<String>; 2] = [None, None];
+        let a = info(true, false, "aaaa");
+        let b = info(true, true, "bbbb");
+        assert_eq!(override_should_swap(&none, &a, &b), None);
+    }
+
+    #[test]
+    fn override_already_in_order_no_swap() {
+        let asn = assignment("aaaa", "bbbb");
+        // slot0 = P1 serial, slot1 = P2 serial -> already correct.
+        let a = info(true, false, "aaaa");
+        let b = info(true, true, "bbbb");
+        assert_eq!(override_should_swap(&asn, &a, &b), Some(false));
+    }
+
+    #[test]
+    fn override_reversed_requests_swap() {
+        let asn = assignment("aaaa", "bbbb");
+        // slot0 holds the P2 serial, slot1 the P1 serial -> swap.
+        let a = info(true, true, "bbbb");
+        let b = info(true, false, "aaaa");
+        assert_eq!(override_should_swap(&asn, &a, &b), Some(true));
+    }
+
+    #[test]
+    fn override_orders_two_same_jumper_pads() {
+        // The key new capability: both pads report the same jumper (both P1),
+        // which the jumper path can't order, but the override still does.
+        let asn = assignment("aaaa", "bbbb");
+        let reversed_a = info(true, false, "bbbb");
+        let reversed_b = info(true, false, "aaaa");
+        assert_eq!(override_should_swap(&asn, &reversed_a, &reversed_b), Some(true));
+
+        let ordered_a = info(true, false, "aaaa");
+        let ordered_b = info(true, false, "bbbb");
+        assert_eq!(override_should_swap(&asn, &ordered_a, &ordered_b), Some(false));
+    }
+
+    #[test]
+    fn lone_pad_defers_to_jumper() {
+        let asn = assignment("aaaa", "bbbb");
+        let a = info(true, false, "aaaa");
+        let empty = info(false, false, "");
+        assert_eq!(override_should_swap(&asn, &a, &empty), None);
+        assert_eq!(override_should_swap(&asn, &empty, &a), None);
+    }
+
+    #[test]
+    fn unknown_serial_defers_to_jumper() {
+        // One connected pad's serial isn't part of the assignment (e.g. a freshly
+        // swapped-in pad) -> fall back to jumper ordering.
+        let asn = assignment("aaaa", "bbbb");
+        let a = info(true, false, "aaaa");
+        let other = info(true, true, "cccc");
+        assert_eq!(override_should_swap(&asn, &a, &other), None);
+    }
+
+    #[test]
+    fn partial_assignment_defers_to_jumper() {
+        // Only one slot pinned -> not a complete override, defer to jumper.
+        let half: [Option<String>; 2] = [Some("aaaa".to_string()), None];
+        let a = info(true, false, "aaaa");
+        let b = info(true, true, "bbbb");
+        assert_eq!(override_should_swap(&half, &a, &b), None);
+    }
 }
