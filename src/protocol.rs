@@ -1,6 +1,10 @@
 // USB device identification.
 pub const SMX_USB_VENDOR_ID: u16 = 0x2341;
 pub const SMX_USB_PRODUCT_ID: u16 = 0x8037;
+/// USB product-string substring that identifies a StepManiaX pad during
+/// enumeration (the hardware shares the Arduino VID, so the product name
+/// disambiguates it).
+pub const SMX_USB_PRODUCT_STRING: &str = "StepManiaX";
 
 // USB report flags for packet fragmentation.
 pub const PACKET_FLAG_START_OF_COMMAND: u8 = 0x04;

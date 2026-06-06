@@ -1,7 +1,7 @@
 //! Full-stack integration tests exercising SmxManager with fake HID devices.
 
 use rustmaniax_sdk::{PanelTestMode, SmxEvent, SmxManager};
-use rustmaniax_sdk::HID_REPORT_COMMAND;
+use rustmaniax_sdk::test_helpers::HID_REPORT_COMMAND;
 use rustmaniax_sdk::test_helpers::{wait_for, FakeDevice, FakeEnumerator};
 
 use std::sync::{Arc, Mutex};
@@ -81,6 +81,40 @@ fn two_devices_ordered_p1_slot0_p2_slot1() {
 
     assert!(!mgr.get_info(0).is_player2);
     assert!(mgr.get_info(1).is_player2);
+}
+
+#[test]
+fn set_player_assignment_overrides_jumper_order() {
+    let (mgr, _dev_p1, _dev_p2, _events) = make_manager_two_devices();
+
+    let both_connected = wait_for(
+        || mgr.get_info(0).connected && mgr.get_info(1).connected,
+        2000,
+    );
+    assert!(both_connected, "Both devices did not connect");
+
+    // Jumper ordering: P1-jumpered pad in slot 0, P2-jumpered pad in slot 1.
+    let s0 = mgr.get_info(0).serial;
+    let s1 = mgr.get_info(1).serial;
+    assert_ne!(s0, s1);
+    assert!(!mgr.get_info(0).is_player2);
+    assert!(mgr.get_info(1).is_player2);
+
+    // Pin the assignment reversed (the P2-jumpered pad becomes P1, slot 0).
+    // The override must beat the jumper, so the slots swap immediately.
+    mgr.set_player_assignment(Some(s1.clone()), Some(s0.clone()));
+    assert_eq!(mgr.get_info(0).serial, s1, "P2-jumpered pad should now be slot 0");
+    assert_eq!(mgr.get_info(1).serial, s0, "P1-jumpered pad should now be slot 1");
+
+    // Re-applying the same assignment is idempotent (no further swap).
+    mgr.set_player_assignment(Some(s1.clone()), Some(s0.clone()));
+    assert_eq!(mgr.get_info(0).serial, s1);
+    assert_eq!(mgr.get_info(1).serial, s0);
+
+    // Clearing the override restores jumper ordering.
+    mgr.set_player_assignment(None, None);
+    assert_eq!(mgr.get_info(0).serial, s0, "jumper order restored after clear");
+    assert_eq!(mgr.get_info(1).serial, s1);
 }
 
 #[test]

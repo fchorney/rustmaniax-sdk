@@ -6,7 +6,7 @@ use std::path::Path;
 
 use rustmaniax_sdk::SmxEvent;
 use rustmaniax_sdk::SmxManager;
-use rustmaniax_sdk::HID_REPORT_COMMAND;
+use rustmaniax_sdk::test_helpers::HID_REPORT_COMMAND;
 use rustmaniax_sdk::test_helpers::{wait_for, ReplayDevice};
 
 use std::sync::{Arc, Mutex};

@@ -7,6 +7,7 @@ This is a port of [stepmaniax-sdk-mp](https://github.com/fchorney/stepmaniax-sdk
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Player Assignment](#player-assignment)
 - [Dependencies](#dependencies)
 - [Building](#building)
 - [Running the Sample](#running-the-sample)
@@ -34,6 +35,27 @@ let mgr = SmxManager::start(|event| match event {
     _ => {}
 }).unwrap();
 ```
+
+## Player Assignment
+
+By default the two pad slots are ordered by each pad's hardware **P1/P2 jumper**
+(slot 0 = P1, slot 1 = P2). When two pads share a jumper — or are installed on the
+wrong sides — you can override the ordering by serial:
+
+```rust
+// Pin which physical pad (by serial) is P1 vs P2. Overrides the jumper and
+// re-orders the slots live. The override only engages when both connected pads'
+// serials are the two given serials; otherwise ordering falls back to the jumper.
+mgr.set_player_assignment(Some(p1_serial), Some(p2_serial));
+
+// Clear the override (follow the jumper again):
+mgr.set_player_assignment(None, None);
+```
+
+For lighting, use `set_lights` with a `2 * BYTES_PER_PAD_25`-byte buffer (the
+hardware-shape constants — `NUM_PANELS`, `BYTES_PER_PAD_16/25`, `LEDS_PER_PANEL_*`,
+`SMX_USB_VENDOR_ID`/`PRODUCT_ID`/`PRODUCT_STRING`, `SERIAL_SIZE` — are re-exported
+from the crate root so callers don't hardcode sizes or device identity).
 
 ## Dependencies
 
