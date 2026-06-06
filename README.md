@@ -7,6 +7,7 @@ This is a port of [stepmaniax-sdk-mp](https://github.com/fchorney/stepmaniax-sdk
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Player Assignment & Indicator Lights](#player-assignment--indicator-lights)
 - [Dependencies](#dependencies)
 - [Building](#building)
 - [Running the Sample](#running-the-sample)
@@ -33,6 +34,30 @@ let mgr = SmxManager::start(|event| match event {
     }
     _ => {}
 }).unwrap();
+```
+
+## Player Assignment & Indicator Lights
+
+By default the two pad slots are ordered by each pad's hardware **P1/P2 jumper**
+(slot 0 = P1, slot 1 = P2). When two pads share a jumper — or are installed on the
+wrong sides — you can override the ordering by serial:
+
+```rust
+// Pin which physical pad (by serial) is P1 vs P2. Overrides the jumper and
+// re-orders the slots live. The override only engages when both connected pads'
+// serials are the two given serials; otherwise ordering falls back to the jumper.
+mgr.set_player_assignment(Some(p1_serial), Some(p2_serial));
+
+// Clear the override (follow the jumper again):
+mgr.set_player_assignment(None, None);
+```
+
+To show the user which physical pad is which, light each pad a solid color by slot
+(`None` = off). Re-send periodically to hold the color:
+
+```rust
+// P1 (slot 0) blue, P2 (slot 1) red.
+mgr.set_solid_lights([Some([0, 80, 255]), Some([255, 40, 40])]);
 ```
 
 ## Dependencies
