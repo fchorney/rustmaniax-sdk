@@ -54,5 +54,6 @@ pub use recorder::{RecordingDevice, RecordingEnumerator};
 // (Wire/protocol internals — packet flags, timeouts, report IDs — stay private.)
 pub use protocol::{
     BYTES_PER_PAD_16, BYTES_PER_PAD_25, LEDS_PER_PANEL_16, LEDS_PER_PANEL_25, NUM_PANELS,
-    PLATFORM_STRIP_LEDS, SERIAL_SIZE, SMX_USB_PRODUCT_ID, SMX_USB_VENDOR_ID,
+    PLATFORM_STRIP_LEDS, SERIAL_SIZE, SMX_USB_PRODUCT_ID, SMX_USB_PRODUCT_STRING,
+    SMX_USB_VENDOR_ID,
 };

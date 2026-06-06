@@ -9,7 +9,7 @@ use crate::protocol::{
     BYTES_PER_PAD_16, BYTES_PER_PAD_25, ENUMERATION_INTERVAL_SECONDS,
     LEGACY_LIGHTS_PAYLOAD_SIZE, LIGHTS_FRAME_INTERVAL, LIGHTS_LEGACY_COMMAND_DELAY, NUM_PANELS,
     PANEL_TEST_REFRESH_SECONDS, PLATFORM_STRIP_LEDS, SERIAL_SIZE, SMX_USB_PRODUCT_ID,
-    SMX_USB_VENDOR_ID,
+    SMX_USB_PRODUCT_STRING, SMX_USB_VENDOR_ID,
 };
 
 /// Panel-side diagnostic test modes.
@@ -593,7 +593,7 @@ fn attempt_connections(shared: &ManagerShared) {
             continue;
         }
 
-        if !dev_info.product.contains("StepManiaX") {
+        if !dev_info.product.contains(SMX_USB_PRODUCT_STRING) {
             continue;
         }
 
