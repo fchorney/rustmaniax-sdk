@@ -54,8 +54,8 @@ mgr.set_player_assignment(None, None);
 
 For lighting, use `set_lights` with a `2 * BYTES_PER_PAD_25`-byte buffer (the
 hardware-shape constants — `NUM_PANELS`, `BYTES_PER_PAD_16/25`, `LEDS_PER_PANEL_*`,
-`SMX_USB_VENDOR_ID`/`PRODUCT_ID`, `SERIAL_SIZE` — are re-exported from the crate
-root so callers don't hardcode sizes).
+`SMX_USB_VENDOR_ID`/`PRODUCT_ID`/`PRODUCT_STRING`, `SERIAL_SIZE` — are re-exported
+from the crate root so callers don't hardcode sizes or device identity).
 
 ## Dependencies
 
