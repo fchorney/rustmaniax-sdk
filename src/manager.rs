@@ -90,10 +90,15 @@ impl SmxManager {
         let enumerator: Box<dyn HidEnumerator> = {
             let real = Box::new(HidapiEnumerator::new()?);
             match std::env::var("SMX_CAPTURE_DIR") {
-                Ok(dir) if !dir.is_empty() => {
+                // Trim surrounding whitespace. A common Windows gotcha is
+                // `set SMX_CAPTURE_DIR=path && app`, which captures the space
+                // before `&&` into the value; the trailing space then lands
+                // mid-path (".../dir \device_0.smxhid") and makes the capture
+                // file unresolvable (os error 3, path not found).
+                Ok(dir) if !dir.trim().is_empty() => {
                     Box::new(crate::recorder::RecordingEnumerator::new(
                         real,
-                        std::path::Path::new(&dir),
+                        std::path::Path::new(dir.trim()),
                         false,
                     ))
                 }
