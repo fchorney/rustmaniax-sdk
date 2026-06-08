@@ -82,6 +82,16 @@ struct ManagerState {
     player_assignment: [Option<String>; 2],
 }
 
+/// Normalize a raw `SMX_CAPTURE_DIR` value: trim surrounding whitespace and
+/// treat empty/whitespace-only as unset. On Windows `set VAR=path && app`
+/// captures the trailing space before `&&` into the value, which otherwise
+/// lands mid-path (".../dir \device_0.smxhid") and makes the capture file
+/// unresolvable (os error 3, path not found).
+fn capture_dir_from_value(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 impl SmxManager {
     /// Creates a manager using the real hidapi enumerator.
     /// If `SMX_CAPTURE_DIR` is set, wraps it with a recording layer that writes
@@ -90,19 +100,15 @@ impl SmxManager {
         let enumerator: Box<dyn HidEnumerator> = {
             let real = Box::new(HidapiEnumerator::new()?);
             match std::env::var("SMX_CAPTURE_DIR") {
-                // Trim surrounding whitespace. A common Windows gotcha is
-                // `set SMX_CAPTURE_DIR=path && app`, which captures the space
-                // before `&&` into the value; the trailing space then lands
-                // mid-path (".../dir \device_0.smxhid") and makes the capture
-                // file unresolvable (os error 3, path not found).
-                Ok(dir) if !dir.trim().is_empty() => {
-                    Box::new(crate::recorder::RecordingEnumerator::new(
+                Ok(raw) => match capture_dir_from_value(&raw) {
+                    Some(dir) => Box::new(crate::recorder::RecordingEnumerator::new(
                         real,
-                        std::path::Path::new(dir.trim()),
+                        std::path::Path::new(dir),
                         false,
-                    ))
-                }
-                _ => real,
+                    )),
+                    None => real,
+                },
+                Err(_) => real,
             }
         };
         Ok(Self::new(enumerator, callback))
@@ -952,8 +958,23 @@ fn generate_serial() -> [u8; SERIAL_SIZE] {
 
 #[cfg(test)]
 mod tests {
-    use super::override_should_swap;
+    use super::{capture_dir_from_value, override_should_swap};
     use crate::device::SmxInfo;
+
+    #[test]
+    fn capture_dir_trims_and_rejects_empty() {
+        // The whole point: a trailing space (the `set VAR=path && app` gotcha)
+        // is stripped so the capture path stays resolvable.
+        assert_eq!(
+            capture_dir_from_value("C:\\tmp\\smx-capture "),
+            Some("C:\\tmp\\smx-capture")
+        );
+        assert_eq!(capture_dir_from_value("  /tmp/cap  "), Some("/tmp/cap"));
+        assert_eq!(capture_dir_from_value("/tmp/cap"), Some("/tmp/cap"));
+        // Empty or whitespace-only means "not set": no recording.
+        assert_eq!(capture_dir_from_value(""), None);
+        assert_eq!(capture_dir_from_value("   "), None);
+    }
 
     fn info(connected: bool, is_player2: bool, serial: &str) -> SmxInfo {
         SmxInfo {
