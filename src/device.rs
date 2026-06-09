@@ -71,6 +71,7 @@ pub struct SmxDevice {
     // Config state.
     config: SmxConfig,
     wanted_config: SmxConfig,
+    raw_old_config: Vec<u8>,
     have_config: bool,
     send_config: bool,
     sending_config: bool,
@@ -92,6 +93,7 @@ impl SmxDevice {
             connection: None,
             config: SmxConfig::zeroed(),
             wanted_config: SmxConfig::zeroed(),
+            raw_old_config: Vec::new(),
             have_config: false,
             send_config: false,
             sending_config: false,
@@ -304,7 +306,8 @@ impl SmxDevice {
 
         if buf[0] == b'g' {
             // Legacy config — convert to new format.
-            let mut padded = payload.to_vec();
+            self.raw_old_config = payload.to_vec();
+            let mut padded = self.raw_old_config.clone();
             padded.resize(size_of::<OldSmxConfig>(), 0);
             convert_to_new_config(&padded, &mut self.config);
         } else {
@@ -344,8 +347,7 @@ impl SmxDevice {
             data.extend_from_slice(config_bytes);
             data
         } else {
-            let config_bytes = bytemuck::bytes_of(&self.config);
-            let mut old_data = config_bytes.to_vec();
+            let mut old_data = self.raw_old_config.clone();
             convert_to_old_config(&self.wanted_config, &mut old_data);
             let mut data = Vec::with_capacity(2 + old_data.len());
             data.push(b'w');
@@ -602,6 +604,9 @@ fn convert_to_old_config(new_config: &SmxConfig, old_data: &mut Vec<u8>) {
         old_data.resize(128, 0xFF);
     }
 
+    // Remember the intended output size before resizing for pointer safety.
+    let output_len = old_data.len();
+
     if old_data.len() < size_of::<OldSmxConfig>() {
         old_data.resize(size_of::<OldSmxConfig>(), 0);
     }
@@ -654,6 +659,9 @@ fn convert_to_old_config(new_config: &SmxConfig, old_data: &mut Vec<u8>) {
 
         write_field!(debounce_delay_ms, new_config.debounce_delay_ms);
     }
+
+    // Restore to the original size — only send as many bytes as the device expects.
+    old_data.truncate(output_len);
 }
 
 #[cfg(test)]
@@ -684,8 +692,10 @@ mod tests {
         let mut old_data = Vec::new();
         convert_to_old_config(&config, &mut old_data);
 
+        let mut padded = old_data;
+        padded.resize(size_of::<OldSmxConfig>(), 0);
         let mut result = SmxConfig::zeroed();
-        convert_to_new_config(&old_data, &mut result);
+        convert_to_new_config(&padded, &mut result);
 
         let debounce_nodelay = result.debounce_nodelay_ms;
         let threshold_7_low = result.panel_settings[7].load_cell_low_threshold;
@@ -905,3 +915,4 @@ mod integration_tests {
         assert!(!info.is_player2);
     }
 }
+

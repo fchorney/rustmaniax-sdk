@@ -604,3 +604,120 @@ fn animation_auto_pauses_on_direct_set_lights() {
 
     mgr.set_animation_auto(false);
 }
+
+// ─── Old Firmware Config Write ───────────────────────────────────────────────
+
+#[test]
+fn set_config_on_old_firmware_sends_128_byte_old_format() {
+    use rustmaniax_sdk::test_helpers::{
+        HID_REPORT_DATA, PACKET_FLAG_END_OF_COMMAND, PACKET_FLAG_HOST_CMD_FINISHED,
+        PACKET_FLAG_START_OF_COMMAND,
+    };
+    use rustmaniax_sdk::SmxConfig;
+
+    const HID_MAX_PAYLOAD: usize = 61;
+
+    // Build a 128-byte old config with known thresholds.
+    // OldSmxConfig layout: [unused1-6][debounce_ms:u16][thresh7_low][thresh7_high]
+    //                      [thresh4_low][thresh4_high][thresh2_low][thresh2_high]...
+    let mut old_config_bytes = vec![0xFFu8; 128];
+    // master_debounce_ms at offset 6 (little-endian u16)
+    old_config_bytes[6] = 15;
+    old_config_bytes[7] = 0;
+    // panel_threshold_7: low=33, high=42 at offset 8-9
+    old_config_bytes[8] = 33;
+    old_config_bytes[9] = 42;
+    // panel_threshold_4: low=35, high=60 at offset 10-11
+    old_config_bytes[10] = 35;
+    old_config_bytes[11] = 60;
+    // config_version at offset 63
+    old_config_bytes[63] = 3;
+    // master_version at offset 62
+    old_config_bytes[62] = 2;
+
+    // Build fragmented config response packets ('g' format)
+    let mut payload = Vec::with_capacity(2 + 128);
+    payload.push(b'g');
+    payload.push(128);
+    payload.extend_from_slice(&old_config_bytes);
+
+    let mut packets = Vec::new();
+    let mut offset = 0;
+    while offset < payload.len() {
+        let chunk_size = HID_MAX_PAYLOAD.min(payload.len() - offset);
+        let mut flags = 0u8;
+        if offset == 0 {
+            flags |= PACKET_FLAG_START_OF_COMMAND;
+        }
+        if offset + chunk_size == payload.len() {
+            flags |= PACKET_FLAG_END_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED;
+        }
+        let mut pkt = vec![0u8; 3 + chunk_size];
+        pkt[0] = HID_REPORT_DATA;
+        pkt[1] = flags;
+        pkt[2] = chunk_size as u8;
+        pkt[3..].copy_from_slice(&payload[offset..offset + chunk_size]);
+        packets.push(pkt);
+        offset += chunk_size;
+    }
+
+    let dev = FakeDevice::new_auto(false, 2);
+    dev.set_config_response(packets);
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = Arc::clone(&events);
+    let enumerator = FakeEnumerator::new(vec![("/dev/smx0".to_string(), dev.clone())]);
+    let mgr = SmxManager::new(Box::new(enumerator), move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    assert!(wait_for(|| mgr.get_info(0).connected, 2000));
+    dev.clear_writes();
+
+    // Modify threshold and write config
+    let mut config: SmxConfig = mgr.get_config(0).unwrap();
+    config.panel_settings[7].load_cell_low_threshold = 70;
+    config.panel_settings[7].load_cell_high_threshold = 71;
+    mgr.set_config(0, config);
+
+    // Wait for write
+    assert!(wait_for(|| !dev.get_writes().is_empty(), 2000));
+
+    // Reassemble fragmented 'w' command payload
+    let writes = dev.get_writes();
+    let mut cmd_payload: Vec<u8> = Vec::new();
+    let mut in_cmd = false;
+    for w in &writes {
+        if w.len() < 4 || w[0] != HID_REPORT_COMMAND {
+            continue;
+        }
+        let flags = w[1];
+        let size = w[2] as usize;
+        if (flags & PACKET_FLAG_START_OF_COMMAND != 0) && size >= 1 && w[3] == b'w' {
+            in_cmd = true;
+            cmd_payload.extend_from_slice(&w[3..3 + size]);
+        } else if in_cmd && (flags & PACKET_FLAG_START_OF_COMMAND == 0) {
+            cmd_payload.extend_from_slice(&w[3..3 + size]);
+            if flags & PACKET_FLAG_END_OF_COMMAND != 0 {
+                break;
+            }
+        }
+    }
+
+    assert!(!cmd_payload.is_empty(), "No 'w' command found in writes");
+    // cmd_payload[0] = 'w', cmd_payload[1] = size, rest = config data
+    assert_eq!(cmd_payload[0], b'w');
+    let config_size = cmd_payload[1];
+    assert_eq!(config_size, 128, "Old firmware config must be 128 bytes, got {config_size}");
+
+    let config_data = &cmd_payload[2..];
+    // Verify modified threshold
+    assert_eq!(config_data[8], 70, "panel_threshold_7_low");
+    assert_eq!(config_data[9], 71, "panel_threshold_7_high");
+    // Verify preserved values
+    assert_eq!(config_data[10], 35, "panel_threshold_4_low preserved");
+    assert_eq!(config_data[11], 60, "panel_threshold_4_high preserved");
+    // Verify unused bytes preserved as 0xFF
+    assert_eq!(config_data[0], 0xFF, "unused1");
+    assert_eq!(config_data[1], 0xFF, "unused2");
+}

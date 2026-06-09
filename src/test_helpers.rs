@@ -6,14 +6,15 @@ use std::sync::{Arc, Mutex};
 use crate::connection::{HidDevice, HidDeviceInfo, HidEnumerator};
 use crate::error::SmxError;
 use crate::protocol::{
-    HID_REPORT_DATA, HID_REPORT_INPUT_STATE, PACKET_FLAG_DEVICE_INFO, PACKET_FLAG_END_OF_COMMAND,
-    PACKET_FLAG_HOST_CMD_FINISHED, PACKET_FLAG_START_OF_COMMAND, SERIAL_SIZE,
+    HID_REPORT_INPUT_STATE, PACKET_FLAG_DEVICE_INFO, SERIAL_SIZE,
 };
 
-// Re-exported for integration/replay tests that inspect raw HID writes. The
-// wire constant lives with the test-support surface rather than the main public
-// API (which only exposes stable hardware-shape constants).
+// Re-exported for integration/replay tests that inspect raw HID writes.
 pub use crate::protocol::HID_REPORT_COMMAND;
+pub use crate::protocol::HID_REPORT_DATA;
+pub use crate::protocol::PACKET_FLAG_END_OF_COMMAND;
+pub use crate::protocol::PACKET_FLAG_HOST_CMD_FINISHED;
+pub use crate::protocol::PACKET_FLAG_START_OF_COMMAND;
 
 /// Thread-safe fake HID device for testing.
 /// Supports auto-responding to commands (for full-stack manager tests).
@@ -103,6 +104,11 @@ impl FakeDevice {
     /// Set whether writes should fail.
     pub fn set_fail_writes(&self, fail: bool) {
         self.inner.lock().unwrap().fail_writes = fail;
+    }
+
+    /// Set the config response packets returned when the device receives a 'g' or 'G' command.
+    pub fn set_config_response(&self, packets: Vec<Vec<u8>>) {
+        self.inner.lock().unwrap().config_response = Some(packets);
     }
 
     /// Queue a Report 3 (input state) packet.
