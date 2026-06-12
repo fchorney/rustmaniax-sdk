@@ -39,14 +39,24 @@ let mgr = SmxManager::start(|event| match event {
 ## Player Assignment
 
 By default the two pad slots are ordered by each pad's hardware **P1/P2 jumper**
-(slot 0 = P1, slot 1 = P2). When two pads share a jumper — or are installed on the
-wrong sides — you can override the ordering by serial:
+(slot 0 = P1, slot 1 = P2). When two pads share a jumper, are installed on the
+wrong sides, or you want to play a single pad on a specific side, you can override
+the ordering by serial:
 
 ```rust
 // Pin which physical pad (by serial) is P1 vs P2. Overrides the jumper and
-// re-orders the slots live. The override only engages when both connected pads'
-// serials are the two given serials; otherwise ordering falls back to the jumper.
+// re-orders the slots live.
+//
+// With two pads connected, the override engages only when both connected serials
+// are the two given serials; otherwise ordering falls back to the jumper.
+//
+// A single connected pad follows a single-sided assignment: pass only the P2
+// serial to place a lone pad on slot 1 (P2), or only the P1 serial to place it on
+// slot 0 (P1), regardless of the pad's jumper.
 mgr.set_player_assignment(Some(p1_serial), Some(p2_serial));
+
+// Single pad played as P2 (its jumper is ignored):
+mgr.set_player_assignment(None, Some(p2_serial));
 
 // Clear the override (follow the jumper again):
 mgr.set_player_assignment(None, None);
