@@ -692,30 +692,57 @@ fn correct_device_order(state: &mut ManagerState) -> bool {
 
 /// Decide ordering from a user-pinned serial->slot assignment.
 ///
-/// Returns `Some(should_swap)` only when an assignment is set, both pads are
-/// connected, and both their serials are exactly the two assigned serials — the
-/// override then forces that order regardless of jumper. Returns `None` (defer to
-/// jumper ordering) when there is no assignment, only one pad is connected, or a
-/// connected pad's serial isn't part of the assignment.
+/// Returns `Some(should_swap)` when the assignment determines the order, or
+/// `None` to defer to jumper ordering (no assignment set, or a connected pad's
+/// serial isn't covered by the assignment).
+///
+/// - **Two pads connected:** only a full two-serial assignment forces an order
+///   (the one case that can separate two pads sharing a jumper).
+/// - **One pad connected:** a single-sided assignment relocates it to its pinned
+///   slot, so a lone stage pinned to P2 moves to slot 1 (and one pinned to P1
+///   moves to slot 0), regardless of its hardware jumper. This is how a single
+///   pad is played as P2.
 fn override_should_swap(
     assignment: &[Option<String>; 2],
     info0: &SmxInfo,
     info1: &SmxInfo,
 ) -> Option<bool> {
-    let (Some(p1), Some(p2)) = (&assignment[0], &assignment[1]) else {
-        return None;
-    };
-    // Lone pad keeps jumper behavior; the override only orders a known pair.
-    if !info0.connected || !info1.connected {
-        return None;
+    let p1 = assignment[0].as_deref();
+    let p2 = assignment[1].as_deref();
+    if p1.is_none() && p2.is_none() {
+        return None; // no assignment at all
     }
-    let (s0, s1) = (&info0.serial, &info1.serial);
-    if s0 == p1 && s1 == p2 {
-        Some(false) // already in the desired order
-    } else if s0 == p2 && s1 == p1 {
-        Some(true) // pads are swapped relative to the assignment
-    } else {
-        None // a serial isn't covered by the assignment -> jumper fallback
+    match (info0.connected, info1.connected) {
+        // Two pads: require the complete pair to force an order; a single pinned
+        // side is ambiguous with two pads present, so defer to the jumper.
+        (true, true) => {
+            let (Some(p1), Some(p2)) = (p1, p2) else {
+                return None;
+            };
+            let (s0, s1) = (info0.serial.as_str(), info1.serial.as_str());
+            if s0 == p1 && s1 == p2 {
+                Some(false) // already in the desired order
+            } else if s0 == p2 && s1 == p1 {
+                Some(true) // pads are swapped relative to the assignment
+            } else {
+                None // a serial isn't covered by the assignment -> jumper fallback
+            }
+        }
+        // Lone pad in slot 0: keep it there if it's the P1 pad, move it to slot 1
+        // if it's the P2 pad. An unassigned serial defers to the jumper.
+        (true, false) => match info0.serial.as_str() {
+            s if p1 == Some(s) => Some(false),
+            s if p2 == Some(s) => Some(true),
+            _ => None,
+        },
+        // Lone pad in slot 1: keep it there if it's the P2 pad, move it to slot 0
+        // if it's the P1 pad.
+        (false, true) => match info1.serial.as_str() {
+            s if p2 == Some(s) => Some(false),
+            s if p1 == Some(s) => Some(true),
+            _ => None,
+        },
+        (false, false) => None,
     }
 }
 
@@ -1031,12 +1058,35 @@ mod tests {
     }
 
     #[test]
-    fn lone_pad_defers_to_jumper() {
+    fn lone_pad_unassigned_serial_defers_to_jumper() {
+        // A lone pad whose serial isn't in the assignment follows its jumper.
         let asn = assignment("aaaa", "bbbb");
-        let a = info(true, false, "aaaa");
+        let other = info(true, false, "cccc");
         let empty = info(false, false, "");
-        assert_eq!(override_should_swap(&asn, &a, &empty), None);
-        assert_eq!(override_should_swap(&asn, &empty, &a), None);
+        assert_eq!(override_should_swap(&asn, &other, &empty), None);
+        assert_eq!(override_should_swap(&asn, &empty, &other), None);
+    }
+
+    #[test]
+    fn lone_pad_pinned_to_p2_relocates_to_slot1() {
+        // The single-pad-as-P2 case: a lone P1-jumpered pad assigned to P2 (only
+        // the P2 serial set) must move from slot 0 to slot 1.
+        let p2_only: [Option<String>; 2] = [None, Some("aaaa".to_string())];
+        let a = info(true, false, "aaaa"); // jumper P1, connected at slot 0
+        let empty = info(false, false, "");
+        assert_eq!(override_should_swap(&p2_only, &a, &empty), Some(true));
+        // Already at slot 1 (e.g. after a prior relocate): stay put.
+        assert_eq!(override_should_swap(&p2_only, &empty, &a), Some(false));
+    }
+
+    #[test]
+    fn lone_pad_pinned_to_p1_stays_at_slot0() {
+        let p1_only: [Option<String>; 2] = [Some("aaaa".to_string()), None];
+        let a = info(true, true, "aaaa"); // jumper P2, but pinned to P1
+        let empty = info(false, false, "");
+        assert_eq!(override_should_swap(&p1_only, &a, &empty), Some(false));
+        // Lone pad at slot 1 pinned to P1 -> relocate to slot 0.
+        assert_eq!(override_should_swap(&p1_only, &empty, &a), Some(true));
     }
 
     #[test]
