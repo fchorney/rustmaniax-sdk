@@ -33,5 +33,10 @@ name = "smx-sample"
 path = "src/bin/sample.rs"
 required-features = ["sample"]
 
+[[bin]]
+name = "smx-sensor-rate"
+path = "src/bin/sensor_rate.rs"
+required-features = ["sample"]
+
 [lints.clippy]
 perf = { level = "warn", priority = -1 }
