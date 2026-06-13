@@ -187,6 +187,10 @@ impl SmxDevice {
         self.sensor_test_mode = mode;
     }
 
+    pub fn is_sensor_test_active(&self) -> bool {
+        self.sensor_test_mode != SensorTestMode::Off
+    }
+
     pub fn get_test_data(&self) -> Option<&SensorTestData> {
         if self.have_sensor_test_data {
             Some(&self.sensor_test_data)
@@ -387,7 +391,8 @@ impl SmxDevice {
 
         let cmd = [b'y', self.sensor_test_mode as u8, b'\n'];
         let conn = self.connection.as_mut().unwrap();
-        conn.send_command(&cmd, None);
+        // Jump ahead of any queued light frames so the response stays prompt.
+        conn.send_command_priority(&cmd, None);
     }
 
     fn handle_sensor_test_response(&mut self, buf: &[u8]) {

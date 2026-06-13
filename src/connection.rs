@@ -332,6 +332,25 @@ impl CommandHandle {
         });
     }
 
+    /// Like `send_command`, but inserts at the FRONT of the queue so it is sent
+    /// ahead of already-queued commands (after any in-flight one finishes).
+    ///
+    /// Lights and sensor-test polling share this single command pipeline. Light
+    /// frames enqueue several commands at 30Hz, so a FIFO sensor request waits
+    /// behind that backlog (measured ~100ms request->response with lights vs
+    /// ~16ms without). Latency-sensitive requests use this to stay prompt
+    /// without reducing the light rate.
+    pub fn send_command_priority(&mut self, cmd: &[u8], callback: Option<CommandCallback>) {
+        let packets = protocol::build_command_packets(cmd);
+        self.pending_commands.push_front(PendingCommand {
+            packets,
+            callback,
+            is_device_info: false,
+            sent: false,
+            sent_at: None,
+        });
+    }
+
     /// Reads a completed response packet from the buffer.
     pub fn read_packet(&mut self) -> Option<Vec<u8>> {
         self.read_buffers.pop_front()

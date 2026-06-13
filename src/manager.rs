@@ -12,6 +12,10 @@ use crate::protocol::{
     SMX_USB_PRODUCT_STRING, SMX_USB_VENDOR_ID,
 };
 
+/// Main-loop poll interval (ms) used while sensor test mode is active, so a new
+/// sensor request fires shortly after each response. Targets ~20Hz+ sampling.
+const SENSOR_TEST_POLL_WAIT_MS: u64 = 20;
+
 /// Panel-side diagnostic test modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -556,6 +560,13 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
                 let until = next.send_at.saturating_duration_since(Instant::now());
                 let ms = until.as_millis() as u64 + 1;
                 wait = wait.min(ms);
+            }
+            // While sensor test mode is active, poll faster so the next request
+            // fires promptly after each response instead of waiting out the full
+            // idle interval (the 50ms default otherwise caps the rate at ~15Hz).
+            if state.devices[0].is_sensor_test_active() || state.devices[1].is_sensor_test_active()
+            {
+                wait = wait.min(SENSOR_TEST_POLL_WAIT_MS);
             }
             wait
         };
