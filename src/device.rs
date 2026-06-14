@@ -192,6 +192,28 @@ impl SmxDevice {
         self.sensor_test_mode != SensorTestMode::Off
     }
 
+    /// Seconds until the next sensor-test request is due, for the main loop to
+    /// time its wake precisely (so polling holds its target rate instead of being
+    /// rounded up to a coarse poll interval). `None` when test mode is off.
+    ///
+    /// While a request is outstanding we return the time until its timeout (the
+    /// response itself wakes the loop sooner); once answered we return the time
+    /// left in the pacing interval.
+    pub fn next_sensor_request_in_secs(&self) -> Option<f64> {
+        if self.sensor_test_mode == SensorTestMode::Off {
+            return None;
+        }
+        let elapsed = self
+            .sensor_request_sent_at
+            .map_or(f64::INFINITY, |s| s.elapsed().as_secs_f64());
+        let target = if self.waiting_for_sensor_response != SensorTestMode::Off {
+            SENSOR_TEST_TIMEOUT_SECONDS
+        } else {
+            SENSOR_TEST_REQUEST_INTERVAL_SECONDS
+        };
+        Some((target - elapsed).max(0.0))
+    }
+
     pub fn get_test_data(&self) -> Option<&SensorTestData> {
         if self.have_sensor_test_data {
             Some(&self.sensor_test_data)

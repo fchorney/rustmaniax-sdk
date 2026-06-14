@@ -143,13 +143,20 @@ fn run_phase(
     };
     let mut tick = 0usize;
     let mut frames_sent = 0u64;
+    let mut next = Instant::now();
     while start.elapsed() < dur {
         if lights {
             mgr.set_lights(&moving_frame(tick));
             tick += 1;
             frames_sent += 1;
         }
-        std::thread::sleep(frame);
+        // Deadline-based pacing so set_lights cost doesn't drag the rate below
+        // the requested Hz.
+        next += frame;
+        let now = Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
+        }
     }
     let elapsed = start.elapsed().as_secs_f64();
     if lights {
