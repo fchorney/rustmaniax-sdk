@@ -552,7 +552,19 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
 
             // Determine wait time.
             let mut wait = shared.main_thread_sleep_ms.load(Ordering::Relaxed).max(1) as u64;
-            if let Some(next) = state.pending_lights.first() {
+            // Only wake early for the next light frame if we could actually send it.
+            // If a previous frame is still un-sent on the wire (coalescing gate in
+            // send_pending_lights), the frame here is past-due and would drive the
+            // wait to ~0 and busy-spin; instead let the ack/poll notify wake us when
+            // the connection drains.
+            let lights_gated = (0..2).any(|pad| {
+                state.devices[pad]
+                    .connection()
+                    .is_some_and(|c| c.has_unsent_lights())
+            });
+            if !lights_gated
+                && let Some(next) = state.pending_lights.first()
+            {
                 let until = next.send_at.saturating_duration_since(Instant::now());
                 let ms = until.as_millis() as u64 + 1;
                 wait = wait.min(ms);
