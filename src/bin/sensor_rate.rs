@@ -1,20 +1,21 @@
 //! Sensor sampling-rate probe (run against a real pad).
 //!
-//! Enables calibrated sensor test mode on the first connected pad, then measures
-//! how many sensor samples per second arrive (a) while streaming light frames at
-//! 30Hz like the game does, and (b) with no light traffic at all. Prints both so
-//! the light-contention effect (and any fix for it) is visible without launching
-//! deadsync or running a song.
+//! Enables calibrated sensor test mode on every connected pad, then measures how
+//! many sensor samples per second arrive (a) while streaming light frames at 30Hz
+//! like the game does, and (b) with no light traffic at all. Prints per-pad rates
+//! so the light-contention effect (and any fix for it) is visible without
+//! launching deadsync or running a song. Running with two pads connected also
+//! shows whether their throughput is independent (each pad has its own pipeline).
 //!
 //! Run: cargo run --features sample --bin smx-sensor-rate [phase_secs] [lights_hz]
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rustmaniax_sdk::{SensorTestMode, SmxEvent, SmxManager};
 
-static SAMPLES: AtomicU64 = AtomicU64::new(0);
-static CONNECTED_PAD: AtomicI64 = AtomicI64::new(-1);
+static SAMPLES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static CONNECTED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 // Two pads worth of 25-LED light data (BYTES_PER_PAD_25 = 675). Matches the
 // frame size the game streams; exact LED values do not matter for timing.
@@ -37,15 +38,19 @@ fn main() {
                 if info.is_player2 { 2 } else { 1 },
                 info.firmware_version
             );
-            let _ = CONNECTED_PAD.compare_exchange(
-                -1,
-                pad as i64,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            );
+            if pad < 2 {
+                CONNECTED[pad].store(true, Ordering::Relaxed);
+            }
         }
-        SmxEvent::SensorTestData { .. } => {
-            SAMPLES.fetch_add(1, Ordering::Relaxed);
+        SmxEvent::Disconnected { pad } => {
+            if pad < 2 {
+                CONNECTED[pad].store(false, Ordering::Relaxed);
+            }
+        }
+        SmxEvent::SensorTestData { pad, .. } => {
+            if pad < 2 {
+                SAMPLES[pad].fetch_add(1, Ordering::Relaxed);
+            }
         }
         _ => {}
     })
@@ -56,30 +61,37 @@ fn main() {
 
     print!("Waiting for a pad");
     let deadline = Instant::now() + Duration::from_secs(15);
-    while CONNECTED_PAD.load(Ordering::Relaxed) < 0 {
+    while !CONNECTED[0].load(Ordering::Relaxed) && !CONNECTED[1].load(Ordering::Relaxed) {
         if Instant::now() > deadline {
             println!(" ... none found, exiting.");
             return;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let pad = CONNECTED_PAD.load(Ordering::Relaxed) as usize;
-    println!(" ... using pad {pad}.\n");
+    std::thread::sleep(Duration::from_millis(300)); // let a second pad enumerate
 
-    // Enable calibrated sensor test mode and let it settle before measuring.
-    mgr.set_test_mode(pad, SensorTestMode::CalibratedValues);
-    std::thread::sleep(Duration::from_secs(1));
+    let active = [
+        CONNECTED[0].load(Ordering::Relaxed),
+        CONNECTED[1].load(Ordering::Relaxed),
+    ];
+    for pad in 0..2 {
+        if active[pad] {
+            println!(" ... pad {pad} active.");
+            mgr.set_test_mode(pad, SensorTestMode::CalibratedValues);
+        }
+    }
+    std::thread::sleep(Duration::from_secs(1)); // settle
 
     let light = vec![32u8; LIGHTS_BYTES];
 
-    let with = run_phase(&mgr, "LIGHTS ON ", phase_secs, lights_hz, Some(&light));
-    let without = run_phase(&mgr, "LIGHTS OFF", phase_secs, 0, None);
+    run_phase(&mgr, "LIGHTS ON ", phase_secs, lights_hz, Some(&light), &active);
+    run_phase(&mgr, "LIGHTS OFF", phase_secs, 0, None, &active);
 
-    mgr.set_test_mode(pad, SensorTestMode::Off);
-
-    println!("\n=== Results (pad {pad}) ===");
-    println!("  lights ON  ({lights_hz}Hz): {with:.1} samples/s");
-    println!("  lights OFF        : {without:.1} samples/s");
+    for pad in 0..2 {
+        if active[pad] {
+            mgr.set_test_mode(pad, SensorTestMode::Off);
+        }
+    }
 }
 
 fn run_phase(
@@ -88,9 +100,12 @@ fn run_phase(
     secs: u64,
     lights_hz: u64,
     light: Option<&[u8]>,
-) -> f64 {
+    active: &[bool; 2],
+) {
     println!("Phase: {label} for {secs}s ...");
-    SAMPLES.store(0, Ordering::Relaxed);
+    for s in &SAMPLES {
+        s.store(0, Ordering::Relaxed);
+    }
     let start = Instant::now();
     let dur = Duration::from_secs(secs);
     let frame = if lights_hz > 0 {
@@ -105,8 +120,11 @@ fn run_phase(
         std::thread::sleep(frame);
     }
     let elapsed = start.elapsed().as_secs_f64();
-    let count = SAMPLES.load(Ordering::Relaxed);
-    let rate = count as f64 / elapsed;
-    println!("  -> {count} samples in {elapsed:.2}s = {rate:.1}/s");
-    rate
+    for pad in 0..2 {
+        if !active[pad] {
+            continue;
+        }
+        let count = SAMPLES[pad].load(Ordering::Relaxed);
+        println!("  pad {pad} -> {count} samples in {elapsed:.2}s = {:.1}/s", count as f64 / elapsed);
+    }
 }
