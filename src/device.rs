@@ -6,7 +6,8 @@ use bytemuck::Zeroable;
 use crate::config::SmxConfig;
 use crate::connection::CommandHandle;
 use crate::protocol::{
-    CONFIG_WRITE_RATE_LIMIT_SECONDS, NUM_PANELS, SENSOR_TEST_TIMEOUT_SECONDS,
+    CONFIG_WRITE_RATE_LIMIT_SECONDS, NUM_PANELS, SENSOR_TEST_REQUEST_INTERVAL_SECONDS,
+    SENSOR_TEST_TIMEOUT_SECONDS,
 };
 
 /// Sensor test modes for reading raw/calibrated sensor values.
@@ -379,11 +380,18 @@ impl SmxDevice {
             return;
         }
 
-        if self.waiting_for_sensor_response != SensorTestMode::Off
-            && let Some(sent_at) = self.sensor_request_sent_at
-            && sent_at.elapsed().as_secs_f64() < SENSOR_TEST_TIMEOUT_SECONDS
-        {
-            return;
+        if let Some(sent_at) = self.sensor_request_sent_at {
+            let elapsed = sent_at.elapsed().as_secs_f64();
+            if self.waiting_for_sensor_response != SensorTestMode::Off {
+                // A request is still outstanding; only re-send if it timed out.
+                if elapsed < SENSOR_TEST_TIMEOUT_SECONDS {
+                    return;
+                }
+            } else if elapsed < SENSOR_TEST_REQUEST_INTERVAL_SECONDS {
+                // Got the response; pace the next request so light frames get
+                // pipeline time in between rather than being starved.
+                return;
+            }
         }
 
         self.waiting_for_sensor_response = self.sensor_test_mode;
@@ -391,7 +399,8 @@ impl SmxDevice {
 
         let cmd = [b'y', self.sensor_test_mode as u8, b'\n'];
         let conn = self.connection.as_mut().unwrap();
-        // Jump ahead of any queued light frames so the response stays prompt.
+        // Jump ahead of any queued light frame so the response stays prompt; the
+        // pacing above keeps this from monopolizing the pipeline.
         conn.send_command_priority(&cmd, None);
     }
 

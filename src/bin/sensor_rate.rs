@@ -95,10 +95,8 @@ fn main() {
     }
     std::thread::sleep(Duration::from_secs(1)); // settle
 
-    let light = vec![32u8; LIGHTS_BYTES];
-
-    run_phase(&mgr, "LIGHTS ON ", phase_secs, lights_hz, Some(&light), &measure);
-    run_phase(&mgr, "LIGHTS OFF", phase_secs, 0, None, &measure);
+    run_phase(&mgr, "LIGHTS ON ", phase_secs, lights_hz, true, &measure);
+    run_phase(&mgr, "LIGHTS OFF", phase_secs, 0, false, &measure);
 
     for pad in 0..2 {
         if measure[pad] {
@@ -107,12 +105,29 @@ fn main() {
     }
 }
 
+// A frame that lights one panel (moving each tick) on both pads. The motion is
+// what makes light lag/backlog visible: if frames are starved, the lit panel
+// stutters or keeps moving after the phase ends instead of tracking in real time.
+fn moving_frame(tick: usize) -> Vec<u8> {
+    const BYTES_PER_PAD: usize = 675; // 9 panels * 25 LEDs * 3 (RGB)
+    const BYTES_PER_PANEL: usize = 75;
+    let mut buf = vec![0u8; LIGHTS_BYTES];
+    let panel = tick % 9;
+    for pad in 0..2 {
+        let base = pad * BYTES_PER_PAD + panel * BYTES_PER_PANEL;
+        for b in 0..BYTES_PER_PANEL {
+            buf[base + b] = 96;
+        }
+    }
+    buf
+}
+
 fn run_phase(
     mgr: &SmxManager,
     label: &str,
     secs: u64,
     lights_hz: u64,
-    light: Option<&[u8]>,
+    lights: bool,
     active: &[bool; 2],
 ) {
     println!("Phase: {label} for {secs}s ...");
@@ -126,13 +141,20 @@ fn run_phase(
     } else {
         Duration::from_millis(50)
     };
+    let mut tick = 0usize;
+    let mut frames_sent = 0u64;
     while start.elapsed() < dur {
-        if let Some(buf) = light {
-            mgr.set_lights(buf);
+        if lights {
+            mgr.set_lights(&moving_frame(tick));
+            tick += 1;
+            frames_sent += 1;
         }
         std::thread::sleep(frame);
     }
     let elapsed = start.elapsed().as_secs_f64();
+    if lights {
+        println!("  (streamed {} light frames = {:.1}/s requested)", frames_sent, frames_sent as f64 / elapsed);
+    }
     for pad in 0..2 {
         if !active[pad] {
             continue;

@@ -950,6 +950,21 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
 }
 
 fn send_pending_lights(state: &mut ManagerState) {
+    // Bound the light backlog: don't hand a new frame to the per-connection
+    // command queue while a previous frame is still unsent there. Lights are
+    // last-writer-wins state, so the newest frame stays in pending_lights (which
+    // coalesces) until the connections drain. Without this, light frames pile up
+    // behind the prioritized sensor request and flush late (panels go dark mid
+    // song, then dump on exit).
+    let lights_in_flight = (0..2).any(|pad| {
+        state.devices[pad]
+            .connection()
+            .is_some_and(|c| c.has_unsent_lights())
+    });
+    if lights_in_flight {
+        return;
+    }
+
     let now = Instant::now();
     let mut consumed = 0;
 
@@ -962,7 +977,7 @@ fn send_pending_lights(state: &mut ManagerState) {
             if cmd.pad_command_len[pad] > 0
                 && let Some(conn) = state.devices[pad].connection_mut()
             {
-                conn.send_command(&cmd.pad_command[pad][..cmd.pad_command_len[pad]], None);
+                conn.send_command_lights(&cmd.pad_command[pad][..cmd.pad_command_len[pad]]);
             }
         }
         consumed += 1;

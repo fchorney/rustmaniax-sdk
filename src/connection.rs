@@ -253,6 +253,8 @@ struct PendingCommand {
     callback: Option<CommandCallback>,
     /// True if this is a device info request.
     is_device_info: bool,
+    /// True if this is a panel-lights command (used to bound the light backlog).
+    is_lights: bool,
     /// True if packets have been sent and we're awaiting a response.
     sent: bool,
     /// When the command was sent (for timeout detection).
@@ -327,6 +329,7 @@ impl CommandHandle {
             packets,
             callback,
             is_device_info: false,
+            is_lights: false,
             sent: false,
             sent_at: None,
         });
@@ -335,20 +338,42 @@ impl CommandHandle {
     /// Like `send_command`, but inserts at the FRONT of the queue so it is sent
     /// ahead of already-queued commands (after any in-flight one finishes).
     ///
-    /// Lights and sensor-test polling share this single command pipeline. Light
-    /// frames enqueue several commands at 30Hz, so a FIFO sensor request waits
-    /// behind that backlog (measured ~100ms request->response with lights vs
-    /// ~16ms without). Latency-sensitive requests use this to stay prompt
-    /// without reducing the light rate.
+    /// Used for latency-sensitive requests (sensor-test polling) so they don't
+    /// wait behind a queued light frame. Lights are coalesced and bounded (see
+    /// `send_command_lights` / `has_unsent_lights`) and the sensor request is
+    /// paced, so this no longer starves the light stream.
     pub fn send_command_priority(&mut self, cmd: &[u8], callback: Option<CommandCallback>) {
         let packets = protocol::build_command_packets(cmd);
         self.pending_commands.push_front(PendingCommand {
             packets,
             callback,
             is_device_info: false,
+            is_lights: false,
             sent: false,
             sent_at: None,
         });
+    }
+
+    /// Queue a panel-lights command. Tagged so the manager can keep at most one
+    /// light frame queued at a time (`has_unsent_lights`), since lights are
+    /// last-writer-wins state and stale frames must never back up behind a
+    /// prioritized sensor request.
+    pub fn send_command_lights(&mut self, cmd: &[u8]) {
+        let packets = protocol::build_command_packets(cmd);
+        self.pending_commands.push_back(PendingCommand {
+            packets,
+            callback: None,
+            is_device_info: false,
+            is_lights: true,
+            sent: false,
+            sent_at: None,
+        });
+    }
+
+    /// True if any un-sent panel-lights command is queued (not counting one
+    /// already in flight). Used to avoid piling new light frames onto the queue.
+    pub fn has_unsent_lights(&self) -> bool {
+        self.pending_commands.iter().any(|c| c.is_lights)
     }
 
     /// Reads a completed response packet from the buffer.
@@ -517,6 +542,7 @@ impl CommandHandle {
             packets: vec![packet],
             callback,
             is_device_info: true,
+            is_lights: false,
             sent: false,
             sent_at: None,
         });
@@ -912,6 +938,34 @@ mod tests {
         cmd.send_command(b"X", None);
         let result = cmd.update();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn lights_command_is_tagged_others_are_not() {
+        let (_poll, mut cmd) = open_fake(FakeDevice::new());
+        cmd.pending_commands.clear(); // drop the auto device-info request
+        assert!(!cmd.has_unsent_lights());
+
+        cmd.send_command_lights(b"4aaa\n");
+        assert!(cmd.has_unsent_lights());
+
+        cmd.pending_commands.clear();
+        cmd.send_command(b"y1\n", None);
+        cmd.send_command_priority(b"y1\n", None);
+        assert!(!cmd.has_unsent_lights(), "sensor/config commands must not be tagged as lights");
+    }
+
+    #[test]
+    fn priority_command_jumps_ahead_of_queued_lights() {
+        let (_poll, mut cmd) = open_fake(FakeDevice::new());
+        cmd.pending_commands.clear();
+
+        cmd.send_command_lights(b"4aaa\n");
+        cmd.send_command_priority(b"y1\n", None);
+
+        // Sensor request at the front, the light frame behind it.
+        assert!(!cmd.pending_commands.front().unwrap().is_lights);
+        assert!(cmd.pending_commands.back().unwrap().is_lights);
     }
 }
 
