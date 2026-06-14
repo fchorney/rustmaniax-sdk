@@ -103,6 +103,13 @@ fn run_phase(
     active: &[bool; 2],
 ) {
     println!("Phase: {label} for {secs}s ...");
+    if light.is_none() {
+        // Visibly clear the panels for the off phase: one frame, not streamed, so
+        // it adds no ongoing light traffic. The pad may re-assert its own idle
+        // lighting afterward, which is on-device and does not contend with sensor
+        // polling.
+        mgr.set_lights(&[0u8; LIGHTS_BYTES]);
+    }
     for s in &SAMPLES {
         s.store(0, Ordering::Relaxed);
     }
