@@ -7,7 +7,14 @@
 //! launching deadsync or running a song. Running with two pads connected also
 //! shows whether their throughput is independent (each pad has its own pipeline).
 //!
-//! Run: cargo run --features sample --bin smx-sensor-rate [phase_secs] [lights_hz]
+//! Run: cargo run --features sample --bin smx-sensor-rate [phase_secs] [lights_hz] [pad]
+//!
+//! `pad` (0 or 1) limits sensor test mode to a single pad. The other connected
+//! pad is then left untouched and acts as a visual control: light frames still
+//! reach it during the on phase (set_lights covers both pads), but in the off
+//! phase it reverts to its firmware idle animation, showing that the host stops
+//! driving lights. A pad that is itself being measured stays in sensor test mode
+//! the whole run and holds its last frame, so it will not show the idle animation.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -27,9 +34,14 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let phase_secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(6);
     let lights_hz: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+    let target_pad: Option<usize> = args.get(3).and_then(|s| s.parse().ok()).filter(|&p| p < 2);
 
     println!("SMX sensor sampling-rate probe");
-    println!("phase length: {phase_secs}s per phase, light rate: {lights_hz}Hz\n");
+    println!("phase length: {phase_secs}s per phase, light rate: {lights_hz}Hz");
+    match target_pad {
+        Some(p) => println!("measuring pad {p} only (other connected pad is a visual control)\n"),
+        None => println!("measuring all connected pads\n"),
+    }
 
     let mgr = SmxManager::start(|event| match event {
         SmxEvent::Connected { pad, info } => {
@@ -70,13 +82,14 @@ fn main() {
     }
     std::thread::sleep(Duration::from_millis(300)); // let a second pad enumerate
 
-    let active = [
-        CONNECTED[0].load(Ordering::Relaxed),
-        CONNECTED[1].load(Ordering::Relaxed),
+    // A pad is measured if it is connected and not excluded by the pad selector.
+    let measure = [
+        CONNECTED[0].load(Ordering::Relaxed) && target_pad.map_or(true, |p| p == 0),
+        CONNECTED[1].load(Ordering::Relaxed) && target_pad.map_or(true, |p| p == 1),
     ];
     for pad in 0..2 {
-        if active[pad] {
-            println!(" ... pad {pad} active.");
+        if measure[pad] {
+            println!(" ... measuring pad {pad}.");
             mgr.set_test_mode(pad, SensorTestMode::CalibratedValues);
         }
     }
@@ -84,11 +97,11 @@ fn main() {
 
     let light = vec![32u8; LIGHTS_BYTES];
 
-    run_phase(&mgr, "LIGHTS ON ", phase_secs, lights_hz, Some(&light), &active);
-    run_phase(&mgr, "LIGHTS OFF", phase_secs, 0, None, &active);
+    run_phase(&mgr, "LIGHTS ON ", phase_secs, lights_hz, Some(&light), &measure);
+    run_phase(&mgr, "LIGHTS OFF", phase_secs, 0, None, &measure);
 
     for pad in 0..2 {
-        if active[pad] {
+        if measure[pad] {
             mgr.set_test_mode(pad, SensorTestMode::Off);
         }
     }
@@ -103,14 +116,6 @@ fn run_phase(
     active: &[bool; 2],
 ) {
     println!("Phase: {label} for {secs}s ...");
-    if light.is_none() {
-        // Hand lighting back to the pad's firmware so its idle animation resumes
-        // during the off phase (streaming set_lights in the on phase takes that
-        // over, leaving the panels frozen otherwise). This is one command, not
-        // streamed frames, and the firmware drives the animation on-device, so the
-        // no-contention baseline is unchanged.
-        mgr.reenable_auto_lights();
-    }
     for s in &SAMPLES {
         s.store(0, Ordering::Relaxed);
     }
