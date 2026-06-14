@@ -104,11 +104,12 @@ fn run_phase(
 ) {
     println!("Phase: {label} for {secs}s ...");
     if light.is_none() {
-        // Visibly clear the panels for the off phase: one frame, not streamed, so
-        // it adds no ongoing light traffic. The pad may re-assert its own idle
-        // lighting afterward, which is on-device and does not contend with sensor
-        // polling.
-        mgr.set_lights(&[0u8; LIGHTS_BYTES]);
+        // Hand lighting back to the pad's firmware so its idle animation resumes
+        // during the off phase (streaming set_lights in the on phase takes that
+        // over, leaving the panels frozen otherwise). This is one command, not
+        // streamed frames, and the firmware drives the animation on-device, so the
+        // no-contention baseline is unchanged.
+        mgr.reenable_auto_lights();
     }
     for s in &SAMPLES {
         s.store(0, Ordering::Relaxed);
