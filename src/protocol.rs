@@ -39,6 +39,10 @@ pub const LEGACY_LIGHTS_PAYLOAD_SIZE: usize = 108;
 pub const COMMAND_TIMEOUT_SECONDS: f64 = 2.0;
 pub const CONFIG_WRITE_RATE_LIMIT_SECONDS: f64 = 1.0;
 pub const SENSOR_TEST_TIMEOUT_SECONDS: f64 = 2.0;
+// Target interval between sensor-test requests. Paces polling so the shared
+// command pipeline has time for light frames in between (avoids starving lights
+// when the sensor request is prioritized). ~30Hz.
+pub const SENSOR_TEST_REQUEST_INTERVAL_SECONDS: f64 = 1.0 / 30.0;
 pub const PANEL_TEST_REFRESH_SECONDS: f64 = 1.0;
 pub const ENUMERATION_INTERVAL_SECONDS: f64 = 1.0;
 pub const LIGHTS_FRAME_INTERVAL: f64 = 1.0 / 30.0;

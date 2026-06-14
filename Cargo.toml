@@ -1,6 +1,6 @@
 [package]
 name = "rustmaniax-sdk"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 description = "Rust SDK for StepManiaX dance pad controllers"
 license = "MIT"
@@ -31,6 +31,11 @@ hidapi = { version = "2.6.5", default-features = false, features = ["windows-nat
 [[bin]]
 name = "smx-sample"
 path = "src/bin/sample.rs"
+required-features = ["sample"]
+
+[[bin]]
+name = "smx-sensor-rate"
+path = "src/bin/sensor_rate.rs"
 required-features = ["sample"]
 
 [lints.clippy]

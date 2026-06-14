@@ -552,10 +552,32 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
 
             // Determine wait time.
             let mut wait = shared.main_thread_sleep_ms.load(Ordering::Relaxed).max(1) as u64;
-            if let Some(next) = state.pending_lights.first() {
+            // Only wake early for the next light frame if we could actually send it.
+            // If a previous frame is still un-sent on the wire (coalescing gate in
+            // send_pending_lights), the frame here is past-due and would drive the
+            // wait to ~0 and busy-spin; instead let the ack/poll notify wake us when
+            // the connection drains.
+            let lights_gated = (0..2).any(|pad| {
+                state.devices[pad]
+                    .connection()
+                    .is_some_and(|c| c.has_unsent_lights())
+            });
+            if !lights_gated
+                && let Some(next) = state.pending_lights.first()
+            {
                 let until = next.send_at.saturating_duration_since(Instant::now());
                 let ms = until.as_millis() as u64 + 1;
                 wait = wait.min(ms);
+            }
+            // While sensor test mode is active, wake exactly when the next sensor
+            // request is due so polling holds its target rate (a coarse fixed
+            // poll interval would round the period up, e.g. a 33ms target served
+            // on 20ms ticks lands at 40ms => ~25Hz instead of ~30Hz).
+            for pad in 0..2 {
+                if let Some(secs) = state.devices[pad].next_sensor_request_in_secs() {
+                    let ms = (secs * 1000.0).ceil() as u64;
+                    wait = wait.min(ms.max(1));
+                }
             }
             wait
         };
@@ -939,6 +961,21 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
 }
 
 fn send_pending_lights(state: &mut ManagerState) {
+    // Bound the light backlog: don't hand a new frame to the per-connection
+    // command queue while a previous frame is still unsent there. Lights are
+    // last-writer-wins state, so the newest frame stays in pending_lights (which
+    // coalesces) until the connections drain. Without this, light frames pile up
+    // behind the prioritized sensor request and flush late (panels go dark mid
+    // song, then dump on exit).
+    let lights_in_flight = (0..2).any(|pad| {
+        state.devices[pad]
+            .connection()
+            .is_some_and(|c| c.has_unsent_lights())
+    });
+    if lights_in_flight {
+        return;
+    }
+
     let now = Instant::now();
     let mut consumed = 0;
 
@@ -951,7 +988,7 @@ fn send_pending_lights(state: &mut ManagerState) {
             if cmd.pad_command_len[pad] > 0
                 && let Some(conn) = state.devices[pad].connection_mut()
             {
-                conn.send_command(&cmd.pad_command[pad][..cmd.pad_command_len[pad]], None);
+                conn.send_command_lights(&cmd.pad_command[pad][..cmd.pad_command_len[pad]]);
             }
         }
         consumed += 1;

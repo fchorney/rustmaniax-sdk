@@ -6,7 +6,8 @@ use bytemuck::Zeroable;
 use crate::config::SmxConfig;
 use crate::connection::CommandHandle;
 use crate::protocol::{
-    CONFIG_WRITE_RATE_LIMIT_SECONDS, NUM_PANELS, SENSOR_TEST_TIMEOUT_SECONDS,
+    CONFIG_WRITE_RATE_LIMIT_SECONDS, NUM_PANELS, SENSOR_TEST_REQUEST_INTERVAL_SECONDS,
+    SENSOR_TEST_TIMEOUT_SECONDS,
 };
 
 /// Sensor test modes for reading raw/calibrated sensor values.
@@ -185,6 +186,32 @@ impl SmxDevice {
 
     pub fn set_sensor_test_mode(&mut self, mode: SensorTestMode) {
         self.sensor_test_mode = mode;
+    }
+
+    pub fn is_sensor_test_active(&self) -> bool {
+        self.sensor_test_mode != SensorTestMode::Off
+    }
+
+    /// Seconds until the next sensor-test request is due, for the main loop to
+    /// time its wake precisely (so polling holds its target rate instead of being
+    /// rounded up to a coarse poll interval). `None` when test mode is off.
+    ///
+    /// While a request is outstanding we return the time until its timeout (the
+    /// response itself wakes the loop sooner); once answered we return the time
+    /// left in the pacing interval.
+    pub fn next_sensor_request_in_secs(&self) -> Option<f64> {
+        if self.sensor_test_mode == SensorTestMode::Off {
+            return None;
+        }
+        let elapsed = self
+            .sensor_request_sent_at
+            .map_or(f64::INFINITY, |s| s.elapsed().as_secs_f64());
+        let target = if self.waiting_for_sensor_response != SensorTestMode::Off {
+            SENSOR_TEST_TIMEOUT_SECONDS
+        } else {
+            SENSOR_TEST_REQUEST_INTERVAL_SECONDS
+        };
+        Some((target - elapsed).max(0.0))
     }
 
     pub fn get_test_data(&self) -> Option<&SensorTestData> {
@@ -375,11 +402,18 @@ impl SmxDevice {
             return;
         }
 
-        if self.waiting_for_sensor_response != SensorTestMode::Off
-            && let Some(sent_at) = self.sensor_request_sent_at
-            && sent_at.elapsed().as_secs_f64() < SENSOR_TEST_TIMEOUT_SECONDS
-        {
-            return;
+        if let Some(sent_at) = self.sensor_request_sent_at {
+            let elapsed = sent_at.elapsed().as_secs_f64();
+            if self.waiting_for_sensor_response != SensorTestMode::Off {
+                // A request is still outstanding; only re-send if it timed out.
+                if elapsed < SENSOR_TEST_TIMEOUT_SECONDS {
+                    return;
+                }
+            } else if elapsed < SENSOR_TEST_REQUEST_INTERVAL_SECONDS {
+                // Got the response; pace the next request so light frames get
+                // pipeline time in between rather than being starved.
+                return;
+            }
         }
 
         self.waiting_for_sensor_response = self.sensor_test_mode;
@@ -387,7 +421,9 @@ impl SmxDevice {
 
         let cmd = [b'y', self.sensor_test_mode as u8, b'\n'];
         let conn = self.connection.as_mut().unwrap();
-        conn.send_command(&cmd, None);
+        // Jump ahead of any queued light frame so the response stays prompt; the
+        // pacing above keeps this from monopolizing the pipeline.
+        conn.send_command_priority(&cmd, None);
     }
 
     fn handle_sensor_test_response(&mut self, buf: &[u8]) {

@@ -102,6 +102,14 @@ Flags:
 
 Enable debug logging with `RUST_LOG=debug`.
 
+There is also a `smx-sensor-rate` probe that measures how many sensor-test samples per second arrive from each connected pad, both while streaming light frames at 30Hz and with no light traffic:
+
+```bash
+cargo run --features sample --bin smx-sensor-rate -- [phase_secs] [lights_hz]
+```
+
+Lights and sensor-test polling share one per-pad command pipeline. The SDK schedules them fairly: light frames are coalesced and bounded to one un-sent frame at a time (last-writer-wins, so stale frames never back up), the sensor request is paced to ~30Hz and inserted ahead of a pending light frame for low latency, and the main loop wakes exactly when the next request is due. This keeps both ~30Hz sensor sampling and ~30Hz lights without either starving the other; under a tight pipeline the light frame rate degrades gracefully rather than backlogging. The probe streams a moving pattern so light lag is visible and reports per-pad sample rates, to confirm on real hardware.
+
 ## Testing
 
 ```bash
