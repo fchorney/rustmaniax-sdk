@@ -42,6 +42,13 @@ struct ManagerShared {
     wake: Condvar,
     // Protected state.
     state: Mutex<ManagerState>,
+    // USB poll handles live behind their own lock, separate from `state`, so the
+    // input-read thread never blocks on `state` while the main thread holds it
+    // for slow USB writes (lights/config). Kept index-aligned with
+    // `state.devices` (paired on connect, swapped together by ordering, cleared
+    // on read error). Lock order is always `state` then `poll_handles`; the poll
+    // thread takes only this lock.
+    poll_handles: Mutex<[Option<PollHandle>; 2]>,
     // Enumerator has its own lock so enumeration doesn't block USB polling.
     enumerator: Mutex<Box<dyn HidEnumerator>>,
     // Polling rate config (atomics for lock-free access from threads).
@@ -55,7 +62,6 @@ struct ManagerShared {
 
 struct ManagerState {
     devices: [SmxDevice; 2],
-    poll_handles: [Option<PollHandle>; 2],
     callback: Arc<dyn Fn(SmxEvent) + Send + Sync>,
     last_enumeration: Option<Instant>,
 
@@ -129,7 +135,6 @@ impl SmxManager {
 
         let state = ManagerState {
             devices,
-            poll_handles: [None, None],
             callback: Arc::clone(&callback),
             last_enumeration: None,
             panel_test_mode: PanelTestMode::Off,
@@ -147,6 +152,7 @@ impl SmxManager {
             shutdown: AtomicBool::new(false),
             wake: Condvar::new(),
             state: Mutex::new(state),
+            poll_handles: Mutex::new([None, None]),
             enumerator: Mutex::new(enumerator),
             main_thread_sleep_ms: AtomicI32::new(50),
             usb_polling_sleep_us: AtomicI32::new(1000),
@@ -253,7 +259,7 @@ impl SmxManager {
     pub fn set_player_assignment(&self, p1_serial: Option<String>, p2_serial: Option<String>) {
         let mut state = self.shared.state.lock().unwrap();
         state.player_assignment = [p1_serial, p2_serial];
-        if correct_device_order(&mut state) {
+        if correct_device_order(&self.shared, &mut state) {
             for i in 0..2 {
                 if state.devices[i].is_connected() {
                     let info = state.devices[i].get_info();
@@ -421,18 +427,16 @@ fn usb_polling_loop(shared: Arc<ManagerShared>) {
     while !shared.shutdown.load(Ordering::Relaxed) {
         let mut should_wake = false;
         {
-            let state = shared.state.lock().unwrap();
+            // Only the poll-handle lock here — never `state` — so a slow USB write
+            // on the main thread (which holds `state`) can't stall input reads.
+            let handles = shared.poll_handles.lock().unwrap();
             let _hold = crate::profile::hold(crate::profile::Site::UsbPoll);
-            for (i, poll_handle) in state.poll_handles.iter().enumerate() {
-                if let Some(ph) = poll_handle
-                    && ph.poll()
-                {
+            for poll_handle in handles.iter().flatten() {
+                if poll_handle.poll() {
                     should_wake = true;
                 }
                 // Also wake if a device has a read error (for prompt disconnect).
-                if let Some(conn) = state.devices[i].connection()
-                    && conn.has_read_error()
-                {
+                if poll_handle.has_read_error() {
                     should_wake = true;
                 }
             }
@@ -511,7 +515,7 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
                 if let Err(e) = state.devices[i].update() {
                     log::error!("Device {i} error: {e}");
                     state.devices[i].close();
-                    state.poll_handles[i] = None;
+                    shared.poll_handles.lock().unwrap()[i] = None;
                 }
             }
 
@@ -519,7 +523,7 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
             let just_connected_any = (!was_connected[0] && state.devices[0].is_connected())
                 || (!was_connected[1] && state.devices[1].is_connected());
 
-            let swapped = just_connected_any && correct_device_order(&mut state);
+            let swapped = just_connected_any && correct_device_order(&shared, &mut state);
 
             let mut just_connected = [
                 !was_connected[0] && state.devices[0].is_connected(),
@@ -681,7 +685,7 @@ fn attempt_connections(shared: &ManagerShared) {
                     cmd_handle.set_always_fire_input(true);
                 }
                 state.devices[slot_idx].set_connection(cmd_handle);
-                state.poll_handles[slot_idx] = Some(poll_handle);
+                shared.poll_handles.lock().unwrap()[slot_idx] = Some(poll_handle);
             }
             Err(e) => {
                 log::error!("Error setting up connection: {e}");
@@ -690,7 +694,7 @@ fn attempt_connections(shared: &ManagerShared) {
     }
 }
 
-fn correct_device_order(state: &mut ManagerState) -> bool {
+fn correct_device_order(shared: &ManagerShared, state: &mut ManagerState) -> bool {
     let info0 = state.devices[0].get_info();
     let info1 = state.devices[1].get_info();
 
@@ -711,7 +715,8 @@ fn correct_device_order(state: &mut ManagerState) -> bool {
 
     if should_swap {
         state.devices.swap(0, 1);
-        state.poll_handles.swap(0, 1);
+        // Keep poll handles index-aligned with devices (lock order: state → poll_handles).
+        shared.poll_handles.lock().unwrap().swap(0, 1);
         // Update pad indices so events report the correct pad number.
         state.devices[0].set_pad_index(0);
         state.devices[1].set_pad_index(1);

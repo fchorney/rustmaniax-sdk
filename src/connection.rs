@@ -238,6 +238,13 @@ impl PollHandle {
     pub fn input_state(&self) -> u16 {
         self.shared.input_state.load(Ordering::Relaxed)
     }
+
+    /// Returns true if this connection's read side hit an error (shared with the
+    /// command side). Lets the USB poll thread flag a disconnect without reaching
+    /// into the manager state.
+    pub fn has_read_error(&self) -> bool {
+        self.shared.had_read_error.load(Ordering::Relaxed)
+    }
 }
 
 // ─── CommandHandle (main I/O thread side) ────────────────────────────────────
