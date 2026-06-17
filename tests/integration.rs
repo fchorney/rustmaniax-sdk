@@ -581,26 +581,34 @@ fn animation_auto_pauses_on_direct_set_lights() {
     mgr.set_animation_auto(true);
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // Verify animation is sending lights.
+    let count_light_cmds = |writes: &[Vec<u8>]| {
+        writes
+            .iter()
+            .filter(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && (w[3] == b'2' || w[3] == b'3'))
+            .count()
+    };
+
+    // Free-running rate: how many light commands the animation sends in 150ms.
     dev.clear_writes();
     std::thread::sleep(std::time::Duration::from_millis(150));
-    let writes_before = dev.get_writes();
-    let cmds_before = writes_before.iter()
-        .filter(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && (w[3] == b'2' || w[3] == b'3'))
-        .count();
-    assert!(cmds_before > 0, "Animation should be sending lights");
+    let cmds_free = count_light_cmds(&dev.get_writes());
+    assert!(cmds_free > 0, "Animation should be sending lights");
 
-    // Direct set_lights should pause animation.
+    // A direct set_lights pauses the animation for ANIMATION_PAUSE_DURATION (100ms).
+    // Flush the single direct frame, then measure strictly inside the remaining
+    // pause (20+50=70ms < 100ms) so only suppressed animation frames are counted.
+    // Excluding the direct frame and staying inside the pause makes this robust to
+    // CI scheduling jitter (the old version compared unequal windows and counted
+    // the direct frame, so `during` could exceed a scheduling-starved `before`).
     mgr.set_lights(&[0u8; 1350]);
+    std::thread::sleep(std::time::Duration::from_millis(20));
     dev.clear_writes();
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    let writes_during = dev.get_writes();
-    let cmds_during = writes_during.iter()
-        .filter(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && (w[3] == b'2' || w[3] == b'3'))
-        .count();
-    // During pause (~100ms), animation should send fewer commands than normal.
-    // Allow some tolerance for thread scheduling variance.
-    assert!(cmds_during <= cmds_before, "Animation should be paused: {cmds_during} > {cmds_before}");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let cmds_paused = count_light_cmds(&dev.get_writes());
+    assert!(
+        cmds_paused < cmds_free,
+        "Animation should be paused by direct set_lights: paused={cmds_paused} free={cmds_free}"
+    );
 
     mgr.set_animation_auto(false);
 }
