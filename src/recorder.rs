@@ -8,7 +8,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::connection::{HidDevice, HidDeviceInfo, HidEnumerator};
@@ -16,19 +16,20 @@ use crate::error::SmxError;
 
 const HID_CAPTURE_MAGIC: &[u8; 7] = b"SMXHID\x01";
 
-/// Wraps a HidDevice and records all reads/writes to a `.smxhid` file.
-pub struct RecordingDevice {
-    device: Box<dyn HidDevice>,
+/// One capture file plus the shared clock for its records. Shared (via `Arc`)
+/// between the read and write handles of a single physical device so both record
+/// into the same interleaved `.smxhid` stream, preserving the one-file-per-device
+/// format even though the device is now opened twice.
+struct RecordingSink {
     file: Mutex<File>,
     start: Instant,
 }
 
-impl RecordingDevice {
-    pub fn new(device: Box<dyn HidDevice>, output_path: &Path) -> std::io::Result<Self> {
+impl RecordingSink {
+    fn create(output_path: &Path) -> std::io::Result<Self> {
         let mut file = File::create(output_path)?;
         file.write_all(HID_CAPTURE_MAGIC)?;
         Ok(Self {
-            device,
             file: Mutex::new(file),
             start: Instant::now(),
         })
@@ -47,11 +48,17 @@ impl RecordingDevice {
     }
 }
 
+/// Wraps a HidDevice and records all reads/writes to a shared `.smxhid` sink.
+pub struct RecordingDevice {
+    device: Box<dyn HidDevice>,
+    sink: Arc<RecordingSink>,
+}
+
 impl HidDevice for RecordingDevice {
     fn read(&self, buf: &mut [u8]) -> Result<usize, SmxError> {
         let n = self.device.read(buf)?;
         if n > 0 {
-            self.write_record(b'R', &buf[..n]);
+            self.sink.write_record(b'R', &buf[..n]);
         }
         Ok(n)
     }
@@ -59,19 +66,24 @@ impl HidDevice for RecordingDevice {
     fn write(&self, buf: &[u8]) -> Result<usize, SmxError> {
         let n = self.device.write(buf)?;
         if n > 0 {
-            self.write_record(b'W', buf);
+            self.sink.write_record(b'W', buf);
         }
         Ok(n)
     }
 }
 
-// RecordingDevice is Send because File is Send and the inner device is Send.
+// RecordingDevice is Send because the inner device is Send and Arc<RecordingSink>
+// is Send + Sync.
 
 /// Wraps a HidEnumerator and records traffic for every opened device.
 pub struct RecordingEnumerator {
     inner: Box<dyn HidEnumerator>,
     output_dir: PathBuf,
-    device_count: Mutex<usize>,
+    // One sink per distinct device path. The manager opens each path twice (read
+    // + write handle); both opens resolve to the same sink, so a device's reads
+    // and writes land in one interleaved file (device_0, device_1, ... numbered
+    // per distinct path, not per open).
+    sinks: Mutex<Vec<(String, Arc<RecordingSink>)>>,
 }
 
 impl RecordingEnumerator {
@@ -94,7 +106,28 @@ impl RecordingEnumerator {
         Self {
             inner,
             output_dir: dir,
-            device_count: Mutex::new(0),
+            sinks: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Return the sink for `path`, creating its capture file on first use.
+    /// `None` if the file can't be created (caller records nothing).
+    fn sink_for(&self, path: &str) -> Option<Arc<RecordingSink>> {
+        let mut sinks = self.sinks.lock().unwrap();
+        if let Some((_, sink)) = sinks.iter().find(|(p, _)| p == path) {
+            return Some(Arc::clone(sink));
+        }
+        let file_path = self.output_dir.join(format!("device_{}.smxhid", sinks.len()));
+        match RecordingSink::create(&file_path) {
+            Ok(sink) => {
+                let sink = Arc::new(sink);
+                sinks.push((path.to_string(), Arc::clone(&sink)));
+                Some(sink)
+            }
+            Err(e) => {
+                log::error!("Failed to create capture file {}: {e}", file_path.display());
+                None
+            }
         }
     }
 }
@@ -106,19 +139,10 @@ impl HidEnumerator for RecordingEnumerator {
 
     fn open(&self, path: &str) -> Result<Box<dyn HidDevice>, SmxError> {
         let device = self.inner.open(path)?;
-
-        let mut count = self.device_count.lock().unwrap();
-        let file_path = self.output_dir.join(format!("device_{}.smxhid", *count));
-        *count += 1;
-
-        match RecordingDevice::new(device, &file_path) {
-            Ok(rec) => Ok(Box::new(rec)),
-            Err(e) => {
-                log::error!("Failed to create capture file {}: {e}", file_path.display());
-                // Return the already-opened device without recording.
-                // RecordingDevice::new consumed `device` on failure, so we must re-open.
-                self.inner.open(path)
-            }
+        match self.sink_for(path) {
+            Some(sink) => Ok(Box::new(RecordingDevice { device, sink })),
+            // Couldn't open a capture file; pass the device through unrecorded.
+            None => Ok(device),
         }
     }
 }

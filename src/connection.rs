@@ -238,6 +238,13 @@ impl PollHandle {
     pub fn input_state(&self) -> u16 {
         self.shared.input_state.load(Ordering::Relaxed)
     }
+
+    /// Returns true if this connection's read side hit an error (shared with the
+    /// command side). Lets the USB poll thread flag a disconnect without reaching
+    /// into the manager state.
+    pub fn has_read_error(&self) -> bool {
+        self.shared.had_read_error.load(Ordering::Relaxed)
+    }
 }
 
 // ─── CommandHandle (main I/O thread side) ────────────────────────────────────
@@ -553,34 +560,33 @@ impl CommandHandle {
 
 /// Opens a connection to an SMX device and returns the split handles.
 ///
-/// `PollHandle` is meant for the USB polling thread.
-/// `CommandHandle` is meant for the main I/O thread.
-/// Both share atomic state for input and a mutex-protected buffer for Report 6 data.
+/// `PollHandle` (USB polling thread) owns `read_device`; `CommandHandle` (main
+/// I/O thread) owns `write_device`. These are two independent device handles to
+/// the same physical device, so a read never waits behind a blocking write.
+/// They share atomic state for input and a mutex-protected buffer for Report 6
+/// data, but NOT the device handle (that shared mutex serialized reads behind
+/// multi-millisecond writes; measured on hardware, a colliding read stalled for
+/// the whole write).
+///
+/// The two handles must address the same physical device: hidapi opens are
+/// per-handle, and on macOS this requires the `macos-shared-device` feature
+/// (non-exclusive open); Linux and Windows already allow shared opens.
 pub fn open_connection(
     path: String,
-    device: Box<dyn HidDevice>,
+    read_device: Box<dyn HidDevice>,
+    write_device: Box<dyn HidDevice>,
     input_callback: Option<Box<dyn Fn(u16) + Send>>,
 ) -> Result<(PollHandle, CommandHandle), SmxError> {
-    // We need two device handles — one for each thread.
-    // However, hidapi doesn't support cloning a device handle.
-    // The C++ code uses a single handle from both threads (read is non-blocking).
-    // In Rust, we need the HidDevice to be Send but we can't share a single
-    // Box<dyn HidDevice> across two threads without Arc<Mutex<>>.
-    //
-    // Solution: The caller provides a single device. We wrap it in an Arc<Mutex<>>
-    // internally so both handles can access it. The poll thread does short non-blocking
-    // reads and the main thread does writes — contention is minimal.
-    let shared_device = Arc::new(Mutex::new(device));
     let shared = Arc::new(SharedState::new());
 
     let poll_handle = PollHandle {
-        device: Box::new(SharedHidDevice(Arc::clone(&shared_device))),
+        device: read_device,
         shared: Arc::clone(&shared),
         input_callback,
     };
 
     let mut cmd_handle = CommandHandle {
-        device: Box::new(SharedHidDevice(Arc::clone(&shared_device))),
+        device: write_device,
         shared,
         path,
         active: false,
@@ -598,21 +604,6 @@ pub fn open_connection(
     Ok((poll_handle, cmd_handle))
 }
 
-/// Wrapper that implements HidDevice by locking a shared Arc<Mutex<Box<dyn HidDevice>>>.
-struct SharedHidDevice(Arc<Mutex<Box<dyn HidDevice>>>);
-
-impl HidDevice for SharedHidDevice {
-    fn read(&self, buf: &mut [u8]) -> Result<usize, SmxError> {
-        self.0.lock().unwrap().read(buf)
-    }
-
-    fn write(&self, buf: &[u8]) -> Result<usize, SmxError> {
-        self.0.lock().unwrap().write(buf)
-    }
-}
-
-// SharedHidDevice contains Arc<Mutex<..>> which is Send, so this is safe.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,9 +614,12 @@ mod tests {
     use crate::test_helpers::FakeDevice;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    // Read and write handles are two clones of one FakeDevice; the clones share
+    // inner state, mirroring how two real handles address one physical device.
     fn open_fake(device: FakeDevice) -> (PollHandle, CommandHandle) {
         open_connection(
             "/dev/fake".to_string(),
+            Box::new(device.clone()),
             Box::new(device.clone()),
             None,
         )
@@ -636,7 +630,13 @@ mod tests {
         device: FakeDevice,
         cb: Box<dyn Fn(u16) + Send>,
     ) -> (PollHandle, CommandHandle) {
-        open_connection("/dev/fake".to_string(), Box::new(device.clone()), Some(cb)).unwrap()
+        open_connection(
+            "/dev/fake".to_string(),
+            Box::new(device.clone()),
+            Box::new(device.clone()),
+            Some(cb),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -979,6 +979,7 @@ mod auto_tests {
         let dev = FakeDevice::new_auto(false, 5);
         let (poll, mut cmd) = open_connection(
             "/dev/test".to_string(),
+            Box::new(dev.clone()),
             Box::new(dev),
             None,
         ).unwrap();
