@@ -721,3 +721,73 @@ fn set_config_on_old_firmware_sends_128_byte_old_format() {
     assert_eq!(config_data[0], 0xFF, "unused1");
     assert_eq!(config_data[1], 0xFF, "unused2");
 }
+
+// ─── Two-handle open (read + write) ──────────────────────────────────────────
+
+use rustmaniax_sdk::{HidDevice, HidDeviceInfo, HidEnumerator, SmxError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Enumerator that fails specific `open` calls (1-based) to exercise the
+/// manager's two-handle open path. The manager opens each device path twice
+/// (read handle, then write handle), so failing open #2 simulates a transient
+/// write-handle open failure right after the read handle opened.
+struct FlakyEnumerator {
+    path: String,
+    device: FakeDevice,
+    open_count: AtomicUsize,
+    fail_on: Vec<usize>,
+}
+
+impl FlakyEnumerator {
+    fn new(path: &str, device: FakeDevice, fail_on: Vec<usize>) -> Self {
+        Self {
+            path: path.to_string(),
+            device,
+            open_count: AtomicUsize::new(0),
+            fail_on,
+        }
+    }
+}
+
+impl HidEnumerator for FlakyEnumerator {
+    fn enumerate(&self, _vid: u16, _pid: u16) -> Vec<HidDeviceInfo> {
+        vec![HidDeviceInfo {
+            path: self.path.clone(),
+            product: "StepManiaX".to_string(),
+        }]
+    }
+
+    fn open(&self, path: &str) -> Result<Box<dyn HidDevice>, SmxError> {
+        let n = self.open_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_on.contains(&n) {
+            return Err(SmxError::NotConnected);
+        }
+        if path == self.path {
+            return Ok(Box::new(self.device.clone()));
+        }
+        Err(SmxError::NotConnected)
+    }
+}
+
+#[test]
+fn transient_write_handle_open_failure_retries_and_connects() {
+    // Fail the 2nd open (the write handle) on the first connect attempt, then
+    // let everything succeed. The path must NOT be marked failed: the device
+    // should connect on a later enumeration (open sequence #1 read ok, #2 write
+    // FAIL -> retry; #3 read ok, #4 write ok -> connected).
+    let dev = FakeDevice::new_auto(false, 5);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = Arc::clone(&events);
+
+    let enumerator = FlakyEnumerator::new("/dev/smx0", dev, vec![2]);
+    let mgr = SmxManager::new(Box::new(enumerator), move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Enumeration is rate-limited to ~1s, so the retry lands on the next pass.
+    let connected = wait_for(|| mgr.get_info(0).connected, 4000);
+    assert!(
+        connected,
+        "device should reconnect after a transient write-handle open failure (path must not be permanently failed)"
+    );
+}

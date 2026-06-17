@@ -664,6 +664,9 @@ fn attempt_connections(shared: &ManagerShared) {
         // for the second open; Linux/Windows already allow shared opens.)
         let devices = {
             let enumerator = shared.enumerator.lock().unwrap();
+            // First (read) open. A failure here means the device can't be opened
+            // at all, so mark the path failed to avoid re-open spam (original
+            // behavior).
             let read_device = match enumerator.open(&dev_info.path) {
                 Ok(d) => d,
                 Err(e) => {
@@ -672,11 +675,18 @@ fn attempt_connections(shared: &ManagerShared) {
                     continue;
                 }
             };
+            // Second (write) open. A failure here, after the read open already
+            // succeeded, is most likely a transient race right after a
+            // disconnect while the OS releases the prior handle. Don't mark the
+            // path failed: drop the read handle and retry on the next
+            // enumeration so a reconnect isn't lost permanently.
             let write_device = match enumerator.open(&dev_info.path) {
                 Ok(d) => d,
                 Err(e) => {
-                    log::error!("Error opening device {} (write): {e}", dev_info.path);
-                    state.failed_paths.push(dev_info.path.clone());
+                    log::warn!(
+                        "Write-handle open failed for {} (read handle dropped, will retry): {e}",
+                        dev_info.path
+                    );
                     continue;
                 }
             };
