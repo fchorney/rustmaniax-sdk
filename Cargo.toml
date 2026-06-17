@@ -28,6 +28,13 @@ hidapi = { version = "2.6.5", default-features = false, features = ["linux-stati
 [target.'cfg(target_os = "windows")'.dependencies]
 hidapi = { version = "2.6.5", default-features = false, features = ["windows-native"] }
 
+# macOS opens IOHIDDevice exclusively by default, so a second open of the same
+# path fails with kIOReturnExclusiveAccess. This feature makes HidApi::new call
+# hid_darwin_set_open_exclusive(0) so the read and write handles can share one
+# device. Linux (hidraw) and Windows already allow shared opens.
+[target.'cfg(target_os = "macos")'.dependencies]
+hidapi = { version = "2.6.5", default-features = false, features = ["macos-shared-device"] }
+
 [[bin]]
 name = "smx-sample"
 path = "src/bin/sample.rs"
