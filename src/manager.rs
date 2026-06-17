@@ -658,17 +658,31 @@ fn attempt_connections(shared: &ManagerShared) {
         };
 
         log::info!("Opening SMX device: {}", dev_info.path);
-        let device = {
+        // Open the path twice: a dedicated read handle for the poll thread and a
+        // dedicated write handle for the main thread, so a read never waits
+        // behind a blocking write. (macOS needs the macos-shared-device feature
+        // for the second open; Linux/Windows already allow shared opens.)
+        let devices = {
             let enumerator = shared.enumerator.lock().unwrap();
-            match enumerator.open(&dev_info.path) {
+            let read_device = match enumerator.open(&dev_info.path) {
                 Ok(d) => d,
                 Err(e) => {
-                    log::error!("Error opening device {}: {e}", dev_info.path);
+                    log::error!("Error opening device {} (read): {e}", dev_info.path);
                     state.failed_paths.push(dev_info.path.clone());
                     continue;
                 }
-            }
+            };
+            let write_device = match enumerator.open(&dev_info.path) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("Error opening device {} (write): {e}", dev_info.path);
+                    state.failed_paths.push(dev_info.path.clone());
+                    continue;
+                }
+            };
+            (read_device, write_device)
         };
+        let (read_device, write_device) = devices;
 
         let input_cb = {
             let callback = Arc::clone(&state.callback);
@@ -679,7 +693,7 @@ fn attempt_connections(shared: &ManagerShared) {
             }) as Box<dyn Fn(u16) + Send>)
         };
 
-        match connection::open_connection(dev_info.path, device, input_cb) {
+        match connection::open_connection(dev_info.path, read_device, write_device, input_cb) {
             Ok((poll_handle, cmd_handle)) => {
                 if state.always_fire_input {
                     cmd_handle.set_always_fire_input(true);

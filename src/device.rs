@@ -880,6 +880,7 @@ mod tests {
         let fake = crate::test_helpers::FakeDevice::new_auto(false, 5);
         let (poll, cmd) = crate::connection::open_connection(
             "/dev/test".to_string(),
+            Box::new(fake.clone()),
             Box::new(fake),
             None,
         ).unwrap();
@@ -929,6 +930,7 @@ mod integration_tests {
         let fake = FakeDevice::new_auto(false, 5);
         let (poll, cmd) = connection::open_connection(
             "/dev/test".to_string(),
+            Box::new(fake.clone()),
             Box::new(fake),
             None,
         )
