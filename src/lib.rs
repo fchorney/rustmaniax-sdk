@@ -24,6 +24,7 @@ mod device;
 mod error;
 mod lights;
 mod manager;
+mod profile;
 mod protocol;
 mod recorder;
 

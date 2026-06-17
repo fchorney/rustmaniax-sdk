@@ -422,6 +422,7 @@ fn usb_polling_loop(shared: Arc<ManagerShared>) {
         let mut should_wake = false;
         {
             let state = shared.state.lock().unwrap();
+            let _hold = crate::profile::hold(crate::profile::Site::UsbPoll);
             for (i, poll_handle) in state.poll_handles.iter().enumerate() {
                 if let Some(ph) = poll_handle
                     && ph.poll()
@@ -461,6 +462,7 @@ fn animation_thread_loop(shared: Arc<ManagerShared>) {
         // Get input states and build frame.
         let (input_states, has_animation) = {
             let state = shared.state.lock().unwrap();
+            let _hold = crate::profile::hold(crate::profile::Site::AnimInputs);
             let inputs = [state.devices[0].input_state(), state.devices[1].input_state()];
             let has_anim = state.devices[0].is_connected() || state.devices[1].is_connected();
             (inputs, has_anim)
@@ -479,6 +481,7 @@ fn animation_thread_loop(shared: Arc<ManagerShared>) {
         // Send lights (bypasses the pause logic by going directly to set_lights_inner).
         {
             let mut state = shared.state.lock().unwrap();
+            let _hold = crate::profile::hold(crate::profile::Site::AnimLights);
             set_lights_inner(&mut state, &frame);
         }
         shared.wake.notify_all();
@@ -493,11 +496,13 @@ fn animation_thread_loop(shared: Arc<ManagerShared>) {
 
 fn main_thread_loop(shared: Arc<ManagerShared>) {
     while !shared.shutdown.load(Ordering::Relaxed) {
+        crate::profile::maybe_report();
         // Attempt connections (releases state lock during enumeration).
         attempt_connections(&shared);
 
         let wait_ms = {
             let mut state = shared.state.lock().unwrap();
+            let _hold = crate::profile::hold(crate::profile::Site::MainUpdate);
 
             let was_connected = [state.devices[0].is_connected(), state.devices[1].is_connected()];
 
@@ -594,6 +599,7 @@ fn attempt_connections(shared: &ManagerShared) {
     // Check if we should enumerate (rate limit + slot availability).
     {
         let state = shared.state.lock().unwrap();
+        let _hold = crate::profile::hold(crate::profile::Site::ConnectCheck);
         let has_slot = state.devices[0].connection().is_none()
             || state.devices[1].connection().is_none();
         if !has_slot {
@@ -616,6 +622,7 @@ fn attempt_connections(shared: &ManagerShared) {
 
     // Re-acquire state lock for connection setup.
     let mut state = shared.state.lock().unwrap();
+    let _hold = crate::profile::hold(crate::profile::Site::ConnectSetup);
     state.last_enumeration = Some(Instant::now());
 
     // Clear failed paths that are no longer in the enumeration (device was unplugged).
