@@ -9,7 +9,7 @@ homepage = "https://github.com/fchorney/rustmaniax-sdk"
 documentation = "https://docs.rs/rustmaniax-sdk"
 
 [features]
-sample = ["dep:ctrlc", "dep:env_logger"]
+sample = ["dep:ctrlc", "dep:env_logger", "dep:crossterm"]
 
 [dependencies]
 hidapi = { version = "2.6.5", default-features = false }
@@ -18,9 +18,10 @@ bytemuck = { version = "1.25.0", features = ["derive"] }
 bitflags = "2.11.1"
 image = { version = "0.25.10", default-features = false, features = ["gif"] }
 
-# Used by smx-sample binary only.
+# Used by sample binaries only.
 ctrlc = { version = "3.4.5", optional = true }
 env_logger = { version = "0.11.10", optional = true }
+crossterm = { version = "0.27", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hidapi = { version = "2.6.5", default-features = false, features = ["linux-static-hidraw"] }
@@ -48,6 +49,11 @@ required-features = ["sample"]
 [[bin]]
 name = "smx-rw-probe"
 path = "src/bin/rw_probe.rs"
+required-features = ["sample"]
+
+[[bin]]
+name = "smx-input-timing"
+path = "src/bin/input_timing.rs"
 required-features = ["sample"]
 
 [lints.clippy]
