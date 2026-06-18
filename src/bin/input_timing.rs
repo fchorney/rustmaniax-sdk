@@ -31,8 +31,9 @@ const MAIN_SLEEP_MS: i32 = 50;
 
 // Gaps below this are OS drain artifacts (two buffered reports read back-to-back),
 // not genuine inter-event intervals. Full Speed USB frames are 1ms so no real
-// gap can be shorter than that.
-const BURST_THRESHOLD_US: u64 = 900;
+// gap can be shorter than that. 1100us gives headroom for OS HID delivery jitter
+// that can make a ~1ms frame appear slightly under 1ms at the software layer.
+const BURST_THRESHOLD_US: u64 = 1100;
 
 // 100us buckets covering 0..20ms. TUI shows at most TUI_MAX_BUCKETS rows;
 // the full 200-bucket table goes in the session summary.
