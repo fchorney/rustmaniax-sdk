@@ -10,9 +10,10 @@
 //! CPU use on that thread. The game/main thread is unaffected because no lock
 //! is held across the sleep.
 //!
-//! The min gap reflects the pad's firmware send rate (packets drained in a
-//! single burst have near-zero inter-callback time). The rolling mean is the
-//! more useful number: it reflects actual sustained throughput.
+//! Burst detection: two callbacks within BURST_THRESHOLD_US of each other are
+//! counted as one drain burst (the poll loop drained multiple queued packets in
+//! a single pass). A large max burst means packets are piling up between polls,
+//! which adds latency even if the mean rate looks healthy.
 //!
 //! Run: cargo run --features sample --bin smx-input-timing [initial_sleep_us]
 
@@ -33,6 +34,10 @@ const MIN_US: i32 = 100;
 const MAX_US: i32 = 5000;
 const STEP_US: i32 = 50;
 const MAIN_SLEEP_MS: i32 = 50;
+// Packets arriving within this threshold are counted as the same drain burst.
+// Genuine inter-packet gaps from the pad firmware are several hundred us at
+// minimum; back-to-back reads in one poll() pass are typically under 10us.
+const BURST_THRESHOLD_US: u64 = 50;
 
 struct PadStats {
     connected: bool,
@@ -42,6 +47,13 @@ struct PadStats {
     window_sum: u64,
     all_min_us: u64,
     all_max_us: u64,
+    // Peak rate tracking: best mean Hz seen over any rolling window snapshot.
+    peak_rate_hz: f64,
+    // Burst tracking.
+    burst_current: u64,
+    burst_max: u64,
+    burst_total: u64,
+    burst_size_sum: u64,
 }
 
 impl PadStats {
@@ -54,6 +66,11 @@ impl PadStats {
             window_sum: 0,
             all_min_us: u64::MAX,
             all_max_us: 0,
+            peak_rate_hz: 0.0,
+            burst_current: 0,
+            burst_max: 0,
+            burst_total: 0,
+            burst_size_sum: 0,
         }
     }
 
@@ -79,8 +96,35 @@ impl PadStats {
             if us > self.all_max_us {
                 self.all_max_us = us;
             }
+
+            // Update peak rate from the current rolling window.
+            if let Some(hz) = self.rate_hz() {
+                if hz > self.peak_rate_hz {
+                    self.peak_rate_hz = hz;
+                }
+            }
+
+            if us < BURST_THRESHOLD_US {
+                self.burst_current += 1;
+            } else {
+                self.close_burst();
+                self.burst_current = 1;
+            }
+        } else {
+            self.burst_current = 1;
         }
         self.last_ts = Some(now);
+    }
+
+    fn close_burst(&mut self) {
+        if self.burst_current > 0 {
+            self.burst_total += 1;
+            self.burst_size_sum += self.burst_current;
+            if self.burst_current > self.burst_max {
+                self.burst_max = self.burst_current;
+            }
+            self.burst_current = 0;
+        }
     }
 
     fn mean_us(&self) -> Option<f64> {
@@ -90,6 +134,11 @@ impl PadStats {
 
     fn rate_hz(&self) -> Option<f64> {
         self.mean_us().map(|m| 1_000_000.0 / m)
+    }
+
+    fn mean_burst(&self) -> Option<f64> {
+        (self.burst_total > 0)
+            .then(|| self.burst_size_sum as f64 / self.burst_total as f64)
     }
 }
 
@@ -167,7 +216,13 @@ fn main() {
         }
 
         let us = sleep_us.load(Ordering::Relaxed);
-        let s = stats.lock().unwrap();
+        let mut s = stats.lock().unwrap();
+
+        // Close any in-progress burst before reading it for display so the
+        // count is current rather than lagging until the next packet arrives.
+        for p in s.iter_mut() {
+            p.close_burst();
+        }
 
         execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All)).ok();
         writeln!(stdout, "SMX Input Timing Probe\r").ok();
@@ -200,9 +255,17 @@ fn main() {
                     writeln!(stdout, "  Rolling rate  : waiting for data...\r").ok();
                 }
             }
+            if p.peak_rate_hz > 0.0 {
+                writeln!(stdout, "  Peak rate     : {:.1} Hz\r", p.peak_rate_hz).ok();
+            }
             if p.all_min_us < u64::MAX {
                 writeln!(stdout, "  Min gap (all) : {} us\r", p.all_min_us).ok();
                 writeln!(stdout, "  Max gap (all) : {} us\r", p.all_max_us).ok();
+            }
+            writeln!(stdout, "  Drain bursts  : {} total\r", p.burst_total).ok();
+            writeln!(stdout, "  Max burst     : {} packets\r", p.burst_max).ok();
+            if let Some(mean) = p.mean_burst() {
+                writeln!(stdout, "  Mean burst    : {mean:.1} packets\r").ok();
             }
             if let Some(ts) = p.last_ts {
                 let ms = ts.elapsed().as_millis();
@@ -217,6 +280,43 @@ fn main() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // Collect summary before tearing down the terminal.
+    let final_us = sleep_us.load(Ordering::Relaxed);
+    let mut summary: Vec<String> = Vec::new();
+    {
+        let mut s = stats.lock().unwrap();
+        for p in s.iter_mut() {
+            p.close_burst();
+        }
+        for pad in 0..2 {
+            let p = &s[pad];
+            if !p.connected || p.total == 0 {
+                continue;
+            }
+            summary.push(format!("Pad {pad}:"));
+            summary.push(format!("  Total packets : {}", p.total));
+            if let (Some(rate), Some(mean)) = (p.rate_hz(), p.mean_us()) {
+                summary.push(format!("  Rolling rate  : {rate:.1} Hz  (mean gap: {mean:.0} us)"));
+            }
+            if p.peak_rate_hz > 0.0 {
+                summary.push(format!("  Peak rate     : {:.1} Hz", p.peak_rate_hz));
+            }
+            if p.all_min_us < u64::MAX {
+                summary.push(format!("  Min gap (all) : {} us", p.all_min_us));
+                summary.push(format!("  Max gap (all) : {} us", p.all_max_us));
+            }
+            summary.push(format!("  Max burst     : {} packets", p.burst_max));
+            if let Some(mean) = p.mean_burst() {
+                summary.push(format!("  Mean burst    : {mean:.1} packets"));
+            }
+        }
+    }
+
     execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show).ok();
     terminal::disable_raw_mode().ok();
+
+    println!("--- Session summary (final poll sleep: {final_us} us) ---");
+    for line in &summary {
+        println!("{line}");
+    }
 }
