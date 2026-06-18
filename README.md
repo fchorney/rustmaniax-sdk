@@ -110,6 +110,15 @@ cargo run --features sample --bin smx-sensor-rate -- [phase_secs] [lights_hz]
 
 Lights and sensor-test polling share one per-pad command pipeline. The SDK schedules them fairly: light frames are coalesced and bounded to one un-sent frame at a time (last-writer-wins, so stale frames never back up), the sensor request is paced to ~30Hz and inserted ahead of a pending light frame for low latency, and the main loop wakes exactly when the next request is due. This keeps both ~30Hz sensor sampling and ~30Hz lights without either starving the other; under a tight pipeline the light frame rate degrades gracefully rather than backlogging. The probe streams a moving pattern so light lag is visible and reports per-pad sample rates, to confirm on real hardware.
 
+There is also an `smx-input-timing` probe that measures the USB input timing precision by histogramming inter-state-change intervals. Use it to confirm the USB 1ms precision floor and find the optimal poll rate for your setup:
+
+```bash
+cargo run --features sample --bin smx-input-timing -- [poll_sleep_us]
+# default: 250us; press up/down to adjust live, r to reset, q to quit
+```
+
+Full Speed USB delivers one HID report per 1ms frame -- the hard precision floor for step timing regardless of firmware sampling rate. The histogram shows genuine inter-change intervals above that floor; OS drain artifacts (two buffered reports read back-to-back, appearing sub-1ms apart) are counted separately. Polling at 2000Hz (500us) is the sweet spot: catches each report within half a USB frame for max 1.5ms total latency; diminishing returns past 4000Hz (250us).
+
 ## Testing
 
 ```bash
