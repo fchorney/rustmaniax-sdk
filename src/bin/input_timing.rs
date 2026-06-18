@@ -1,16 +1,15 @@
-//! Firmware sensor loop rate probe.
+//! USB input timing probe.
 //!
-//! Tracks genuine input state changes (always_fire_input OFF) and builds a
-//! histogram of inter-change intervals to fingerprint the pad's sensor polling
-//! period.
+//! Tracks genuine input state changes and histograms inter-change intervals.
 //!
-//! Step rapidly on any panel. If the firmware samples sensors at a fixed rate
-//! (e.g. every 2ms), detectable events are quantized to that grid and the
-//! histogram clusters at multiples of the loop period (2ms, 4ms, 6ms, ...).
-//! The minimum observed interval is an upper bound on the firmware loop period.
+//! Any gap below BURST_THRESHOLD_US is a drain artifact: two USB reports from
+//! back-to-back 1ms frames that were buffered by the OS and drained together,
+//! making them appear microseconds apart instead of ~1ms apart. These are
+//! counted separately and excluded from the histogram.
 //!
-//! Keep the USB poll sleep well below the expected firmware period (e.g. 250us)
-//! so software polling jitter doesn't wash out the quantization signal.
+//! Genuine gaps cluster at the USB frame boundary (~1ms) and human step
+//! timing above that. Since Full Speed USB delivers one report per 1ms frame,
+//! 1ms is the absolute precision floor regardless of firmware sampling rate.
 //!
 //! Run: cargo run --features sample --bin smx-input-timing [initial_sleep_us]
 
@@ -30,23 +29,32 @@ const MAX_US: i32 = 5000;
 const STEP_US: i32 = 50;
 const MAIN_SLEEP_MS: i32 = 50;
 
-// Histogram config. 500us buckets covering 0..20ms, always display at least
-// 0..5ms so the interesting sub-5ms region is always visible.
-const BUCKET_US: u64 = 500;
-const NUM_BUCKETS: usize = 40;
-const MIN_SHOW_BUCKETS: usize = 10;
+// Gaps below this are OS drain artifacts (two buffered reports read back-to-back),
+// not genuine inter-event intervals. Full Speed USB frames are 1ms so no real
+// gap can be shorter than that.
+const BURST_THRESHOLD_US: u64 = 900;
+
+// 100us buckets covering 0..20ms. TUI shows at most TUI_MAX_BUCKETS rows;
+// the full 200-bucket table goes in the session summary.
+const BUCKET_US: u64 = 100;
+const NUM_BUCKETS: usize = 200;
+const TUI_MAX_BUCKETS: usize = 50; // 0..5ms visible in the live view
+const MIN_SHOW_BUCKETS: usize = 20; // always show at least 0..2ms
 const BAR_WIDTH: usize = 28;
 
 struct PadStats {
     connected: bool,
     changes: u64,
     last_ts: Option<Instant>,
+    // Genuine intervals (>= BURST_THRESHOLD_US).
     buckets: [u64; NUM_BUCKETS],
     overflow: u64,
     min_us: u64,
     max_us: u64,
     sum_us: u64,
     interval_count: u64,
+    // Drain artifacts (< BURST_THRESHOLD_US).
+    burst_count: u64,
 }
 
 impl PadStats {
@@ -61,6 +69,7 @@ impl PadStats {
             max_us: 0,
             sum_us: 0,
             interval_count: 0,
+            burst_count: 0,
         }
     }
 
@@ -75,20 +84,20 @@ impl PadStats {
         self.changes += 1;
         if let Some(prev) = self.last_ts {
             let us = now.duration_since(prev).as_micros() as u64;
-            let idx = (us / BUCKET_US) as usize;
-            if idx < NUM_BUCKETS {
-                self.buckets[idx] += 1;
+            if us < BURST_THRESHOLD_US {
+                self.burst_count += 1;
             } else {
-                self.overflow += 1;
+                let idx = (us / BUCKET_US) as usize;
+                if idx < NUM_BUCKETS {
+                    self.buckets[idx] += 1;
+                } else {
+                    self.overflow += 1;
+                }
+                if us < self.min_us { self.min_us = us; }
+                if us > self.max_us { self.max_us = us; }
+                self.sum_us += us;
+                self.interval_count += 1;
             }
-            if us < self.min_us {
-                self.min_us = us;
-            }
-            if us > self.max_us {
-                self.max_us = us;
-            }
-            self.sum_us += us;
-            self.interval_count += 1;
         }
         self.last_ts = Some(now);
     }
@@ -97,64 +106,60 @@ impl PadStats {
         (self.interval_count > 0).then(|| self.sum_us as f64 / self.interval_count as f64)
     }
 
-    // How many buckets to display: enough to cover all populated data plus a
-    // small margin, but always at least MIN_SHOW_BUCKETS.
-    fn show_buckets(&self) -> usize {
+    // How many buckets to show in the TUI: enough to cover all populated data
+    // plus a small margin, clamped to [MIN_SHOW_BUCKETS, TUI_MAX_BUCKETS].
+    fn tui_show_buckets(&self) -> usize {
+        let last = self.buckets[..TUI_MAX_BUCKETS]
+            .iter()
+            .rposition(|&c| c > 0)
+            .unwrap_or(0);
+        (last + 3).max(MIN_SHOW_BUCKETS).min(TUI_MAX_BUCKETS)
+    }
+
+    // Last populated bucket across the full table (for the session summary).
+    fn summary_show_buckets(&self) -> usize {
         let last = self.buckets.iter().rposition(|&c| c > 0).unwrap_or(0);
-        (last + 3).max(MIN_SHOW_BUCKETS).min(NUM_BUCKETS)
+        (last + 2).min(NUM_BUCKETS)
     }
 }
 
-fn render_histogram(stdout: &mut impl Write, p: &PadStats) {
-    let show = p.show_buckets();
+fn render_histogram(stdout: &mut impl Write, p: &PadStats, show: usize) {
     let max_count = p.buckets[..show].iter().copied().max().unwrap_or(1).max(1);
-
     for i in 0..show {
         let ms = i as f64 * BUCKET_US as f64 / 1_000.0;
         let count = p.buckets[i];
         let bar_len = (count as usize * BAR_WIDTH) / max_count as usize;
         writeln!(
             stdout,
-            "  {:5.1}ms [{:5}] {}\r",
-            ms,
-            count,
+            "  {:5.2}ms [{:5}] {}\r",
+            ms, count,
             "█".repeat(bar_len)
         )
         .ok();
     }
-    let overflow_threshold_ms = show as f64 * BUCKET_US as f64 / 1_000.0;
-    if p.overflow > 0 {
-        writeln!(
-            stdout,
-            "  >{:.1}ms [{:5}]\r",
-            overflow_threshold_ms, p.overflow
-        )
-        .ok();
+    let threshold_ms = show as f64 * BUCKET_US as f64 / 1_000.0;
+    let overflow: u64 = p.buckets[show..].iter().sum::<u64>() + p.overflow;
+    if overflow > 0 {
+        writeln!(stdout, "  >{:.2}ms [{:5}]\r", threshold_ms, overflow).ok();
     }
 }
 
-fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats, has_data: bool) {
+fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats) {
     writeln!(
         stdout,
-        "Pad {pad}:  ({} state changes, {} intervals)\r",
-        p.changes, p.interval_count
+        "Pad {pad}:  ({} state changes, {} genuine intervals, {} drain artifacts filtered)\r",
+        p.changes, p.interval_count, p.burst_count
     )
     .ok();
 
-    if !has_data {
+    if p.interval_count < 2 {
         writeln!(stdout, "  Step rapidly on any panel to populate histogram.\r").ok();
         writeln!(stdout, "\r").ok();
         return;
     }
 
     if p.min_us < u64::MAX {
-        let min_hz = 1_000_000.0 / p.min_us as f64;
-        writeln!(
-            stdout,
-            "  Min gap  : {:6} us  =>  firmware loop <= ~{min_hz:.0} Hz\r",
-            p.min_us
-        )
-        .ok();
+        writeln!(stdout, "  Min gap  : {:6} us\r", p.min_us).ok();
     }
     if let Some(mean) = p.mean_us() {
         writeln!(stdout, "  Mean gap : {:6.0} us\r", mean).ok();
@@ -166,11 +171,12 @@ fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats, has_data: bool) 
     writeln!(stdout, "\r").ok();
     writeln!(
         stdout,
-        "  Inter-change interval histogram ({}us buckets):\r",
-        BUCKET_US
+        "  Histogram ({}us buckets, showing 0..{:.1}ms):\r",
+        BUCKET_US,
+        p.tui_show_buckets() as f64 * BUCKET_US as f64 / 1_000.0
     )
     .ok();
-    render_histogram(stdout, p);
+    render_histogram(stdout, p, p.tui_show_buckets());
     writeln!(stdout, "\r").ok();
 }
 
@@ -205,7 +211,6 @@ fn main() {
     })
     .expect("Failed to initialize HID");
 
-    // always_fire_input stays OFF -- only genuine state changes fire the callback.
     mgr.set_polling_rate(MAIN_SLEEP_MS, initial_us);
 
     terminal::enable_raw_mode().expect("enable raw mode");
@@ -251,7 +256,7 @@ fn main() {
         let s = stats.lock().unwrap();
 
         execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All)).ok();
-        writeln!(stdout, "SMX Firmware Rate Probe\r").ok();
+        writeln!(stdout, "SMX Input Timing Probe\r").ok();
         writeln!(
             stdout,
             "USB poll sleep: {us} us  [up/down: adjust, r: reset, q: quit]\r"
@@ -259,7 +264,8 @@ fn main() {
         .ok();
         writeln!(
             stdout,
-            "Clustering at multiples of N ms = firmware sensor loop at 1000/N Hz.\r"
+            "Precision floor: ~1ms (Full Speed USB frame). Gaps < {}us are drain artifacts.\r",
+            BURST_THRESHOLD_US
         )
         .ok();
         writeln!(stdout, "\r").ok();
@@ -271,8 +277,7 @@ fn main() {
                 writeln!(stdout, "\r").ok();
                 continue;
             }
-            let has_data = p.interval_count >= 2;
-            print_pad(&mut stdout, pad, p, has_data);
+            print_pad(&mut stdout, pad, p);
         }
 
         drop(s);
@@ -280,26 +285,21 @@ fn main() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // Collect summary before tearing down the terminal.
     let final_us = sleep_us.load(Ordering::Relaxed);
     let mut summary: Vec<String> = Vec::new();
     {
         let s = stats.lock().unwrap();
         for pad in 0..2 {
             let p = &s[pad];
-            if !p.connected || p.interval_count == 0 {
+            if !p.connected || p.changes == 0 {
                 continue;
             }
             summary.push(format!(
-                "Pad {pad}:  ({} state changes, {} intervals)",
-                p.changes, p.interval_count
+                "Pad {pad}:  ({} changes, {} genuine, {} drain artifacts)",
+                p.changes, p.interval_count, p.burst_count
             ));
             if p.min_us < u64::MAX {
-                let hz = 1_000_000.0 / p.min_us as f64;
-                summary.push(format!(
-                    "  Min gap  : {} us  =>  firmware loop <= ~{hz:.0} Hz",
-                    p.min_us
-                ));
+                summary.push(format!("  Min gap  : {} us", p.min_us));
             }
             if let Some(mean) = p.mean_us() {
                 summary.push(format!("  Mean gap : {mean:.0} us"));
@@ -307,15 +307,17 @@ fn main() {
             if p.max_us > 0 {
                 summary.push(format!("  Max gap  : {} us", p.max_us));
             }
-            let show = p.show_buckets();
+            let show = p.summary_show_buckets();
             summary.push(format!("  Histogram ({}us buckets):", BUCKET_US));
             for i in 0..show {
-                let ms = i as f64 * BUCKET_US as f64 / 1_000.0;
-                summary.push(format!("    {:5.1}ms  {}", ms, p.buckets[i]));
+                if p.buckets[i] > 0 {
+                    let ms = i as f64 * BUCKET_US as f64 / 1_000.0;
+                    summary.push(format!("    {:6.2}ms  {}", ms, p.buckets[i]));
+                }
             }
             if p.overflow > 0 {
                 let t = show as f64 * BUCKET_US as f64 / 1_000.0;
-                summary.push(format!("    >{t:.1}ms  {}", p.overflow));
+                summary.push(format!("    >{t:.2}ms  {}", p.overflow));
             }
         }
     }
