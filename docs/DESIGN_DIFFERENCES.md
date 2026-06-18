@@ -7,12 +7,14 @@ This document explains the architectural and design decisions that differ betwee
 **C++:** `SMXDeviceConnection` is a single class accessed by two threads. The USB polling thread calls `PollUSBData()` and the main I/O thread calls `Update()`/`SendCommand()`. Thread safety is managed by careful documentation, atomics, and a mutex on the Report 6 buffer.
 
 **Rust:** The connection is split into two separate types at construction time:
-- `PollHandle` — owned by the USB polling thread (can only read)
-- `CommandHandle` — owned by the main I/O thread (can send commands and process responses)
+- `PollHandle` — owned by the USB polling thread; reads only (owns the device's *read* HID handle)
+- `CommandHandle` — owned by the main I/O thread; sends commands and processes responses (owns the device's *write* HID handle)
 
-Both share state through `Arc<AtomicU16>` (input state) and `Arc<Mutex<Vec<u8>>>` (Report 6 buffer).
+They share input and coordination state through `Arc` (`AtomicU16` input state, `AtomicBool` flags, `Mutex<Vec<u8>>` Report 6 buffer), but **not** the HID handle — each owns its own.
 
 **Why:** Rust's type system enforces thread safety at compile time. A single struct accessed from two threads requires `unsafe` or wrapping everything in `Arc<Mutex<>>`. The split design makes the threading contract explicit in the types — `PollHandle` physically cannot call `send_command()`, and `CommandHandle` physically cannot call `poll()`. This eliminates an entire class of bugs that the C++ version guards against with documentation and careful coding.
+
+**Shared by both SDKs as of 1.4.0:** the *separate read/write HID handles* (so an input read never waits behind a blocking write) and keeping the USB poll thread *off the manager's state lock* are now present in both the Rust and C++ SDKs — those are no longer differences. What remains different here is purely structural: two distinct types vs one class holding two handles. See [ARCHITECTURE.md](ARCHITECTURE.md) for the lock and handle details.
 
 ## Callback System: Events with Data
 

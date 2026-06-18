@@ -21,7 +21,7 @@ This document describes the internal architecture of the Rust SDK. For the USB p
 │   - Spawns USB polling thread + main I/O thread                         │
 │   - Handles device discovery and ordering                               │
 │   - Routes API calls to the correct SmxDevice                           │
-│   - Enumerator lock separate from state lock (non-blocking enumeration) │
+│   - Poll-handle + enumerator locks kept off the state lock (see below)  │
 └───────────┬─────────────────────────────────┬───────────────────────────┘
             │                                 │
             ▼                                 ▼
@@ -80,7 +80,7 @@ The SDK uses two background threads, matching the C++ SDK's design:
 
 ### USB Polling Thread (~1ms cycle)
 
-- Calls `PollHandle::poll()` for each connected device
+- Calls `PollHandle::poll()` for each connected device, reading on the dedicated read handle while holding only the `poll_handles` lock (never `state`) — see [Lock Hierarchy](#lock-hierarchy)
 - Parses Report 3 (input state) inline — updates `AtomicU16`, fires `SmxEvent::InputState` callback
 - Buffers Report 6 (command responses) in a `Mutex<Vec<u8>>` for the main thread
 - Wakes the main thread via `Condvar` when Report 6 data arrives or a read error occurs
@@ -99,10 +99,18 @@ The SDK uses two background threads, matching the C++ SDK's design:
 ### Lock Hierarchy
 
 ```
-ManagerShared::enumerator (Mutex)  — held only during enumerate/open calls
-ManagerShared::state (Mutex)       — held during device updates and API calls
-SharedState::report6_buffer (Mutex) — held briefly for buffer swap
+ManagerShared::state (Mutex)        — manager/connection state, device updates, API calls
+ManagerShared::poll_handles (Mutex) — the USB poll thread's read handles
+ManagerShared::enumerator (Mutex)   — held only during enumerate/open calls
+SharedState::report6_buffer (Mutex) — held briefly for the buffer handoff
 ```
+
+Two design choices keep input reads off the write path, so a blocking USB write never stalls them:
+
+- **Separate read/write HID handles.** Each device is opened twice. `PollHandle` owns a read handle (used only by `poll()`); `CommandHandle` owns a write handle (used only by `update()` / `send_command()`). Independent OS handles let a read and a write run concurrently instead of serializing on one `Arc<Mutex<HidDevice>>`. On macOS the `macos-shared-device` hidapi feature is enabled so the second open is allowed; Linux and Windows already permit shared opens.
+- **Poll handles off the state lock.** The USB polling thread takes only `poll_handles` — never `state` — so the main thread holding `state` across a blocking write can't stall polling. The main thread takes both (lock order `state → poll_handles`) only when it connects, disconnects, or reorders a device (the moments it mutates the read handles the poll thread reads). The poll thread never takes `state`, so the ordering is deadlock-free.
+
+The `SmxEvent::InputState` callback fires from `poll()` while `poll_handles` is held; per the event-based design (see [DESIGN_DIFFERENCES.md](DESIGN_DIFFERENCES.md)) the callback must not call back into the manager.
 
 The enumerator has its own lock so that HID enumeration (potentially slow on some platforms) doesn't block the USB polling thread or API calls.
 
