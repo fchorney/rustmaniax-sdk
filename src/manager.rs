@@ -31,8 +31,25 @@ struct PendingLightsCommand {
 pub struct SmxManager {
     shared: Arc<ManagerShared>,
     main_thread: Option<thread::JoinHandle<()>>,
-    usb_thread: Option<thread::JoinHandle<()>>,
     anim_thread: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+/// A running per-pad USB poll thread plus the flag used to stop it. The thread
+/// owns its `PollHandle` and does blocking reads, so each pad's input is read
+/// independently (one pad's blocking read never delays the other's).
+struct PollThread {
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl PollThread {
+    /// Signals the thread to stop and waits for it to exit. The thread checks the
+    /// flag after each read returns (within one read timeout), so this returns
+    /// promptly; on a read error the thread is already exiting on its own.
+    fn stop_and_join(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.handle.join();
+    }
 }
 
 /// State shared between the manager's threads and the public API.
@@ -42,18 +59,19 @@ struct ManagerShared {
     wake: Condvar,
     // Protected state.
     state: Mutex<ManagerState>,
-    // USB poll handles live behind their own lock, separate from `state`, so the
-    // input-read thread never blocks on `state` while the main thread holds it
-    // for slow USB writes (lights/config). Kept index-aligned with
-    // `state.devices` (paired on connect, swapped together by ordering, cleared
-    // on read error). Lock order is always `state` then `poll_handles`; the poll
-    // thread takes only this lock.
-    poll_handles: Mutex<[Option<PollHandle>; 2]>,
+    // One USB poll thread per pad. Each thread owns its `PollHandle` and reads
+    // its device with blocking reads, entirely off the `state` lock, so a slow
+    // USB write on the main thread (which holds `state`) can't stall input reads,
+    // and the two pads never block on each other. This collection is just the
+    // thread/stop bookkeeping; the main thread touches it only briefly to spawn
+    // on connect, reap on read error, swap on reorder, and join on shutdown.
+    // Kept index-aligned with `state.devices`. Lock order is always `state` then
+    // `poll_threads`.
+    poll_threads: Mutex<[Option<PollThread>; 2]>,
     // Enumerator has its own lock so enumeration doesn't block USB polling.
     enumerator: Mutex<Box<dyn HidEnumerator>>,
-    // Polling rate config (atomics for lock-free access from threads).
+    // Main-thread loop cadence (ms); atomic for lock-free access from threads.
     main_thread_sleep_ms: AtomicI32,
-    usb_polling_sleep_us: AtomicI32,
     // Animation state.
     animation: Mutex<crate::lights::AnimationState>,
     anim_running: AtomicBool,
@@ -152,10 +170,9 @@ impl SmxManager {
             shutdown: AtomicBool::new(false),
             wake: Condvar::new(),
             state: Mutex::new(state),
-            poll_handles: Mutex::new([None, None]),
+            poll_threads: Mutex::new([None, None]),
             enumerator: Mutex::new(enumerator),
             main_thread_sleep_ms: AtomicI32::new(50),
-            usb_polling_sleep_us: AtomicI32::new(1000),
             animation: Mutex::new(crate::lights::AnimationState::new()),
             anim_running: AtomicBool::new(false),
             anim_pause_until: Mutex::new(None),
@@ -164,13 +181,12 @@ impl SmxManager {
         let shared_main = Arc::clone(&shared);
         let main_thread = thread::spawn(move || main_thread_loop(shared_main));
 
-        let shared_usb = Arc::clone(&shared);
-        let usb_thread = thread::spawn(move || usb_polling_loop(shared_usb));
+        // Per-pad poll threads are spawned on connect (see attempt_connections),
+        // not here, since they each own a connection's read handle.
 
         Self {
             shared,
             main_thread: Some(main_thread),
-            usb_thread: Some(usb_thread),
             anim_thread: Mutex::new(None),
         }
     }
@@ -211,10 +227,14 @@ impl SmxManager {
         state.devices[pad].set_config(config);
     }
 
-    /// Sets polling rates.
-    pub fn set_polling_rate(&self, main_thread_ms: i32, usb_polling_us: i32) {
+    /// Sets the main-thread loop cadence (milliseconds), which paces lifecycle
+    /// work: enumeration, command writes, lights, and config/sensor responses.
+    ///
+    /// Input reads are no longer paced by a poll interval: each pad's poll thread
+    /// blocks on the device and wakes the instant a report arrives, so there is no
+    /// USB poll rate to tune.
+    pub fn set_main_thread_sleep_ms(&self, main_thread_ms: i32) {
         self.shared.main_thread_sleep_ms.store(main_thread_ms, Ordering::Relaxed);
-        self.shared.usb_polling_sleep_us.store(usb_polling_us, Ordering::Relaxed);
     }
 
     /// Re-enables automatic panel lighting on both pads.
@@ -415,37 +435,37 @@ impl Drop for SmxManager {
         if let Some(t) = self.main_thread.take() {
             let _ = t.join();
         }
-        if let Some(t) = self.usb_thread.take() {
-            let _ = t.join();
+        // Stop and join the per-pad poll threads. They observe `shutdown` after
+        // their current read returns (within one read timeout). Collect them out
+        // of the lock first so the joins don't hold it.
+        let threads: Vec<PollThread> = {
+            let mut guard = self.shared.poll_threads.lock().unwrap();
+            guard.iter_mut().filter_map(Option::take).collect()
+        };
+        for thread in threads {
+            thread.stop_and_join();
         }
     }
 }
 
 // ─── Threading ───────────────────────────────────────────────────────────────
 
-fn usb_polling_loop(shared: Arc<ManagerShared>) {
-    while !shared.shutdown.load(Ordering::Relaxed) {
-        let mut should_wake = false;
-        {
-            // Only the poll-handle lock here — never `state` — so a slow USB write
-            // on the main thread (which holds `state`) can't stall input reads.
-            let handles = shared.poll_handles.lock().unwrap();
-            let _hold = crate::profile::hold(crate::profile::Site::UsbPoll);
-            for poll_handle in handles.iter().flatten() {
-                if poll_handle.poll() {
-                    should_wake = true;
-                }
-                // Also wake if a device has a read error (for prompt disconnect).
-                if poll_handle.has_read_error() {
-                    should_wake = true;
-                }
-            }
-        }
-        if should_wake {
+/// One USB poll thread per connected pad. Owns the connection's `PollHandle` and
+/// blocks on the device, so the thread wakes the instant a report arrives and the
+/// two pads read fully independently. Exits when told to stop, on global
+/// shutdown, or when its device hits a read error (the main thread then closes
+/// the device and reaps this thread).
+fn pad_poll_loop(poll: PollHandle, stop: Arc<AtomicBool>, shared: Arc<ManagerShared>) {
+    while !stop.load(Ordering::Relaxed) && !shared.shutdown.load(Ordering::Relaxed) {
+        let buffered_report6 = poll.poll(crate::protocol::POLL_READ_TIMEOUT_MS);
+        // Input changes already fired via the inline callback; wake the main
+        // thread only to process buffered Report 6 data or a read error promptly.
+        if buffered_report6 || poll.has_read_error() {
             shared.wake.notify_all();
         }
-        let us = shared.usb_polling_sleep_us.load(Ordering::Relaxed).max(100);
-        thread::sleep(Duration::from_micros(us as u64));
+        if poll.has_read_error() {
+            break;
+        }
     }
 }
 
@@ -515,7 +535,12 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
                 if let Err(e) = state.devices[i].update() {
                     log::error!("Device {i} error: {e}");
                     state.devices[i].close();
-                    shared.poll_handles.lock().unwrap()[i] = None;
+                    // Reap this pad's poll thread. It set the read error and is
+                    // already exiting, so the join returns promptly.
+                    let thread = shared.poll_threads.lock().unwrap()[i].take();
+                    if let Some(thread) = thread {
+                        thread.stop_and_join();
+                    }
                 }
             }
 
@@ -599,7 +624,7 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
 
 // ─── Device Discovery ────────────────────────────────────────────────────────
 
-fn attempt_connections(shared: &ManagerShared) {
+fn attempt_connections(shared: &Arc<ManagerShared>) {
     // Check if we should enumerate (rate limit + slot availability).
     {
         let state = shared.state.lock().unwrap();
@@ -709,7 +734,21 @@ fn attempt_connections(shared: &ManagerShared) {
                     cmd_handle.set_always_fire_input(true);
                 }
                 state.devices[slot_idx].set_connection(cmd_handle);
-                shared.poll_handles.lock().unwrap()[slot_idx] = Some(poll_handle);
+
+                // Spawn this pad's poll thread, handing it the read handle. The
+                // slot is free (connection was None), so reap any stale entry
+                // first to be safe, then store the new thread.
+                let stop = Arc::new(AtomicBool::new(false));
+                let thread_shared = Arc::clone(shared);
+                let thread_stop = Arc::clone(&stop);
+                let handle = thread::spawn(move || {
+                    pad_poll_loop(poll_handle, thread_stop, thread_shared)
+                });
+                let mut threads = shared.poll_threads.lock().unwrap();
+                if let Some(old) = threads[slot_idx].take() {
+                    old.stop_and_join();
+                }
+                threads[slot_idx] = Some(PollThread { stop, handle });
             }
             Err(e) => {
                 log::error!("Error setting up connection: {e}");
@@ -739,8 +778,11 @@ fn correct_device_order(shared: &ManagerShared, state: &mut ManagerState) -> boo
 
     if should_swap {
         state.devices.swap(0, 1);
-        // Keep poll handles index-aligned with devices (lock order: state → poll_handles).
-        shared.poll_handles.lock().unwrap().swap(0, 1);
+        // Keep poll threads index-aligned with devices. The threads keep reading
+        // their own devices; only the slot bookkeeping swaps. Events still report
+        // the right pad because the input callback reads the shared pad-index
+        // atomic, updated by set_pad_index below. (Lock order: state → poll_threads.)
+        shared.poll_threads.lock().unwrap().swap(0, 1);
         // Update pad indices so events report the correct pad number.
         state.devices[0].set_pad_index(0);
         state.devices[1].set_pad_index(1);

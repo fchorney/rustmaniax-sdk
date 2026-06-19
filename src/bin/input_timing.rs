@@ -1,20 +1,22 @@
-//! USB input timing probe.
+//! USB input resolution probe.
 //!
-//! Tracks genuine input state changes and histograms inter-change intervals.
+//! Confirms the interrupt-driven read path resolves input at the USB frame floor
+//! (~1ms), now that each pad's poll thread blocks on the device and wakes the
+//! instant a report arrives. Runs in change-only mode, so the callback fires on
+//! real panel-state transitions: the ~10Hz idle heartbeat and same-state repeats
+//! are dropped, and every recorded event is a genuine input change.
 //!
-//! Any gap below BURST_THRESHOLD_US is a drain artifact: two USB reports from
-//! back-to-back 1ms frames that were buffered by the OS and drained together,
-//! making them appear microseconds apart instead of ~1ms apart. These are
-//! counted separately and excluded from the histogram.
+//! A human can't generate 1000 changes/sec, so this is not about report volume.
+//! It is about resolution: when two genuine changes land a frame apart (a jump
+//! hitting two panels, a fast roll, sensor flicker), do they arrive ~1ms apart
+//! rather than coalesced or delayed to the next heartbeat? The Min gap and the
+//! sub-2ms histogram buckets are the answer. Full Speed USB delivers one report
+//! per 1ms frame, so ~1ms is the floor regardless of firmware sampling rate.
 //!
-//! Genuine gaps cluster at the USB frame boundary (~1ms) and human step
-//! timing above that. Since Full Speed USB delivers one report per 1ms frame,
-//! 1ms is the absolute precision floor regardless of firmware sampling rate.
-//!
-//! Run: cargo run --features sample --bin smx-input-timing [initial_sleep_us]
+//! Run: cargo run --features sample --bin smx-input-timing
 
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,19 +26,8 @@ use crossterm::execute;
 use crossterm::terminal::{self, Clear, ClearType};
 use rustmaniax_sdk::{SmxEvent, SmxManager};
 
-const MIN_US: i32 = 100;
-const MAX_US: i32 = 5000;
-const STEP_US: i32 = 50;
-const MAIN_SLEEP_MS: i32 = 50;
-
-// Gaps below this are OS drain artifacts (two buffered reports read back-to-back),
-// not genuine inter-event intervals. Full Speed USB frames are 1ms so no real
-// gap can be shorter than that. 1100us gives headroom for OS HID delivery jitter
-// that can make a ~1ms frame appear slightly under 1ms at the software layer.
-const BURST_THRESHOLD_US: u64 = 1100;
-
-// 100us buckets covering 0..20ms. TUI shows at most TUI_MAX_BUCKETS rows;
-// the full 200-bucket table goes in the session summary.
+// 100us buckets covering 0..20ms. The TUI shows a window; the session summary
+// dumps the full populated range.
 const BUCKET_US: u64 = 100;
 const NUM_BUCKETS: usize = 200;
 const TUI_MAX_BUCKETS: usize = 50; // 0..5ms visible in the live view
@@ -45,24 +36,26 @@ const BAR_WIDTH: usize = 28;
 
 struct PadStats {
     connected: bool,
-    changes: u64,
+    reports: u64,
     last_ts: Option<Instant>,
-    // Genuine intervals (>= BURST_THRESHOLD_US).
+    // Inter-arrival interval distribution.
     buckets: [u64; NUM_BUCKETS],
     overflow: u64,
     min_us: u64,
     max_us: u64,
     sum_us: u64,
     interval_count: u64,
-    // Drain artifacts (< BURST_THRESHOLD_US).
-    burst_count: u64,
+    // Rolling rate window.
+    window_start: Instant,
+    window_reports: u64,
+    rate_hz: f64,
 }
 
 impl PadStats {
     fn new() -> Self {
         Self {
             connected: false,
-            changes: 0,
+            reports: 0,
             last_ts: None,
             buckets: [0; NUM_BUCKETS],
             overflow: 0,
@@ -70,7 +63,9 @@ impl PadStats {
             max_us: 0,
             sum_us: 0,
             interval_count: 0,
-            burst_count: 0,
+            window_start: Instant::now(),
+            window_reports: 0,
+            rate_hz: 0.0,
         }
     }
 
@@ -80,35 +75,40 @@ impl PadStats {
         self.connected = connected;
     }
 
-    fn on_change(&mut self) {
+    fn on_report(&mut self) {
         let now = Instant::now();
-        self.changes += 1;
+        self.reports += 1;
+        self.window_reports += 1;
         if let Some(prev) = self.last_ts {
             let us = now.duration_since(prev).as_micros() as u64;
-            if us < BURST_THRESHOLD_US {
-                self.burst_count += 1;
+            let idx = (us / BUCKET_US) as usize;
+            if idx < NUM_BUCKETS {
+                self.buckets[idx] += 1;
             } else {
-                let idx = (us / BUCKET_US) as usize;
-                if idx < NUM_BUCKETS {
-                    self.buckets[idx] += 1;
-                } else {
-                    self.overflow += 1;
-                }
-                if us < self.min_us { self.min_us = us; }
-                if us > self.max_us { self.max_us = us; }
-                self.sum_us += us;
-                self.interval_count += 1;
+                self.overflow += 1;
             }
+            if us < self.min_us { self.min_us = us; }
+            if us > self.max_us { self.max_us = us; }
+            self.sum_us += us;
+            self.interval_count += 1;
         }
         self.last_ts = Some(now);
+
+        // Refresh the rolling rate roughly twice a second.
+        let elapsed = now.duration_since(self.window_start).as_secs_f64();
+        if elapsed >= 0.5 {
+            self.rate_hz = self.window_reports as f64 / elapsed;
+            self.window_start = now;
+            self.window_reports = 0;
+        }
     }
 
     fn mean_us(&self) -> Option<f64> {
         (self.interval_count > 0).then(|| self.sum_us as f64 / self.interval_count as f64)
     }
 
-    // How many buckets to show in the TUI: enough to cover all populated data
-    // plus a small margin, clamped to [MIN_SHOW_BUCKETS, TUI_MAX_BUCKETS].
+    // How many buckets to show in the TUI: enough to cover populated data plus a
+    // small margin, clamped to [MIN_SHOW_BUCKETS, TUI_MAX_BUCKETS].
     fn tui_show_buckets(&self) -> usize {
         let last = self.buckets[..TUI_MAX_BUCKETS]
             .iter()
@@ -132,7 +132,7 @@ fn render_histogram(stdout: &mut impl Write, p: &PadStats, show: usize) {
         let bar_len = (count as usize * BAR_WIDTH) / max_count as usize;
         writeln!(
             stdout,
-            "  {:5.2}ms [{:5}] {}\r",
+            "  {:5.2}ms [{:7}] {}\r",
             ms, count,
             "█".repeat(bar_len)
         )
@@ -141,29 +141,35 @@ fn render_histogram(stdout: &mut impl Write, p: &PadStats, show: usize) {
     let threshold_ms = show as f64 * BUCKET_US as f64 / 1_000.0;
     let overflow: u64 = p.buckets[show..].iter().sum::<u64>() + p.overflow;
     if overflow > 0 {
-        writeln!(stdout, "  >{:.2}ms [{:5}]\r", threshold_ms, overflow).ok();
+        writeln!(stdout, "  >{:.2}ms [{:7}]\r", threshold_ms, overflow).ok();
     }
 }
 
 fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats) {
     writeln!(
         stdout,
-        "Pad {pad}:  ({} state changes, {} genuine intervals, {} drain artifacts filtered)\r",
-        p.changes, p.interval_count, p.burst_count
+        "Pad {pad}:  {:.0} changes/sec  ({} changes total)\r",
+        p.rate_hz, p.reports
     )
     .ok();
 
     if p.interval_count < 2 {
-        writeln!(stdout, "  Step rapidly on any panel to populate histogram.\r").ok();
+        writeln!(stdout, "  Waiting for input reports...\r").ok();
         writeln!(stdout, "\r").ok();
         return;
     }
 
     if p.min_us < u64::MAX {
-        writeln!(stdout, "  Min gap  : {:6} us\r", p.min_us).ok();
+        writeln!(
+            stdout,
+            "  Min gap  : {:6} us  ({:.0} Hz peak resolution)\r",
+            p.min_us,
+            1_000_000.0 / p.min_us.max(1) as f64
+        )
+        .ok();
     }
     if let Some(mean) = p.mean_us() {
-        writeln!(stdout, "  Mean gap : {:6.0} us\r", mean).ok();
+        writeln!(stdout, "  Mean gap : {:6.0} us  ({:.0} Hz)\r", mean, 1_000_000.0 / mean).ok();
     }
     if p.max_us > 0 {
         writeln!(stdout, "  Max gap  : {:6} us\r", p.max_us).ok();
@@ -172,7 +178,7 @@ fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats) {
     writeln!(stdout, "\r").ok();
     writeln!(
         stdout,
-        "  Histogram ({}us buckets, showing 0..{:.1}ms):\r",
+        "  Inter-arrival histogram ({}us buckets, showing 0..{:.1}ms):\r",
         BUCKET_US,
         p.tui_show_buckets() as f64 * BUCKET_US as f64 / 1_000.0
     )
@@ -184,14 +190,6 @@ fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats) {
 fn main() {
     env_logger::init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let initial_us: i32 = args
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(250)
-        .clamp(MIN_US, MAX_US);
-
-    let sleep_us = Arc::new(AtomicI32::new(initial_us));
     let running = Arc::new(AtomicBool::new(true));
     let stats: Arc<Mutex<[PadStats; 2]>> =
         Arc::new(Mutex::new([PadStats::new(), PadStats::new()]));
@@ -202,17 +200,20 @@ fn main() {
             stats_cb.lock().unwrap()[pad].connected = true;
         }
         SmxEvent::Disconnected { pad } if pad < 2 => {
-            let mut s = stats_cb.lock().unwrap();
-            s[pad] = PadStats::new();
+            stats_cb.lock().unwrap()[pad] = PadStats::new();
         }
         SmxEvent::InputState { pad, .. } if pad < 2 => {
-            stats_cb.lock().unwrap()[pad].on_change();
+            stats_cb.lock().unwrap()[pad].on_report();
         }
         _ => {}
     })
     .expect("Failed to initialize HID");
 
-    mgr.set_polling_rate(MAIN_SLEEP_MS, initial_us);
+    // Change-only mode (the SDK default, set explicitly here for clarity): the
+    // callback fires on real panel-state transitions only. The ~10Hz idle
+    // heartbeat and same-state repeats are dropped, so every event we record is
+    // a genuine input change and the inter-arrival reflects change resolution.
+    mgr.set_input_state_mode(false);
 
     terminal::enable_raw_mode().expect("enable raw mode");
     let mut stdout = io::stdout();
@@ -225,16 +226,6 @@ fn main() {
         while event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
                 match key.code {
-                    KeyCode::Up => {
-                        let v = (sleep_us.load(Ordering::Relaxed) + STEP_US).min(MAX_US);
-                        sleep_us.store(v, Ordering::Relaxed);
-                        mgr.set_polling_rate(MAIN_SLEEP_MS, v);
-                    }
-                    KeyCode::Down => {
-                        let v = (sleep_us.load(Ordering::Relaxed) - STEP_US).max(MIN_US);
-                        sleep_us.store(v, Ordering::Relaxed);
-                        mgr.set_polling_rate(MAIN_SLEEP_MS, v);
-                    }
                     KeyCode::Char('r') => {
                         let mut s = stats.lock().unwrap();
                         s[0].reset();
@@ -253,20 +244,13 @@ fn main() {
             }
         }
 
-        let us = sleep_us.load(Ordering::Relaxed);
         let s = stats.lock().unwrap();
 
         execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All)).ok();
-        writeln!(stdout, "SMX Input Timing Probe\r").ok();
+        writeln!(stdout, "SMX Input Resolution Probe  [r: reset, q: quit]\r").ok();
         writeln!(
             stdout,
-            "USB poll sleep: {us} us  [up/down: adjust, r: reset, q: quit]\r"
-        )
-        .ok();
-        writeln!(
-            stdout,
-            "Precision floor: ~1ms (Full Speed USB frame). Gaps < {}us are drain artifacts.\r",
-            BURST_THRESHOLD_US
+            "Change-only mode. A Min gap near ~1ms confirms input resolves at the USB frame floor.\r"
         )
         .ok();
         writeln!(stdout, "\r").ok();
@@ -286,30 +270,33 @@ fn main() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let final_us = sleep_us.load(Ordering::Relaxed);
     let mut summary: Vec<String> = Vec::new();
     {
         let s = stats.lock().unwrap();
         for pad in 0..2 {
             let p = &s[pad];
-            if !p.connected || p.changes == 0 {
+            if !p.connected || p.reports == 0 {
                 continue;
             }
             summary.push(format!(
-                "Pad {pad}:  ({} changes, {} genuine, {} drain artifacts)",
-                p.changes, p.interval_count, p.burst_count
+                "Pad {pad}:  {:.0} changes/sec ({} changes total)",
+                p.rate_hz, p.reports
             ));
             if p.min_us < u64::MAX {
-                summary.push(format!("  Min gap  : {} us", p.min_us));
+                summary.push(format!(
+                    "  Min gap  : {} us ({:.0} Hz peak resolution)",
+                    p.min_us,
+                    1_000_000.0 / p.min_us.max(1) as f64
+                ));
             }
             if let Some(mean) = p.mean_us() {
-                summary.push(format!("  Mean gap : {mean:.0} us"));
+                summary.push(format!("  Mean gap : {mean:.0} us ({:.0} Hz)", 1_000_000.0 / mean));
             }
             if p.max_us > 0 {
                 summary.push(format!("  Max gap  : {} us", p.max_us));
             }
             let show = p.summary_show_buckets();
-            summary.push(format!("  Histogram ({}us buckets):", BUCKET_US));
+            summary.push(format!("  Inter-arrival histogram ({}us buckets):", BUCKET_US));
             for i in 0..show {
                 if p.buckets[i] > 0 {
                     let ms = i as f64 * BUCKET_US as f64 / 1_000.0;
@@ -326,7 +313,7 @@ fn main() {
     execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show).ok();
     terminal::disable_raw_mode().ok();
 
-    println!("--- Session summary (final poll sleep: {final_us} us) ---");
+    println!("--- Session summary ---");
     for line in &summary {
         println!("{line}");
     }
