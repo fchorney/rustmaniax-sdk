@@ -891,7 +891,7 @@ mod tests {
         // Connect.
         for _ in 0..20 {
             device.update().unwrap();
-            poll.poll();
+            poll.poll(0);
             if device.is_connected() { break; }
         }
         assert!(device.is_connected());
@@ -942,7 +942,7 @@ mod integration_tests {
         // Simulate the manager loop: update then poll, repeat.
         for _ in 0..20 {
             device.update().unwrap();
-            poll.poll();
+            poll.poll(0);
             if device.is_connected() {
                 break;
             }

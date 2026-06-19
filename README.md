@@ -91,11 +91,11 @@ cargo run --features sample --bin smx-sample
 cargo run --features sample --bin smx-sample -- --all-packets
 cargo run --features sample --bin smx-sample -- --calibrated
 cargo run --features sample --bin smx-sample -- --test-mode
-cargo run --features sample --bin smx-sample -- 50 500 --all-packets
+cargo run --features sample --bin smx-sample -- 50 --all-packets
 ```
 
 Flags:
-- `[main_thread_ms] [usb_polling_us]` — polling rate (positional args)
+- `[main_thread_ms]` — main-thread loop cadence (positional arg). Paces lifecycle work (enumeration, command writes, lights, config/sensor responses). Input reads are not paced by it — each pad's poll thread blocks on the device and wakes when a report arrives.
 - `--all-packets` — fire input callback on every USB packet (not just changes)
 - `--test-mode` — enable panel pressure test mode
 - `--uncalibrated` / `--calibrated` / `--noise` / `--tare` — sensor test modes
@@ -110,14 +110,14 @@ cargo run --features sample --bin smx-sensor-rate -- [phase_secs] [lights_hz]
 
 Lights and sensor-test polling share one per-pad command pipeline. The SDK schedules them fairly: light frames are coalesced and bounded to one un-sent frame at a time (last-writer-wins, so stale frames never back up), the sensor request is paced to ~30Hz and inserted ahead of a pending light frame for low latency, and the main loop wakes exactly when the next request is due. This keeps both ~30Hz sensor sampling and ~30Hz lights without either starving the other; under a tight pipeline the light frame rate degrades gracefully rather than backlogging. The probe streams a moving pattern so light lag is visible and reports per-pad sample rates, to confirm on real hardware.
 
-There is also an `smx-input-timing` probe that measures the USB input timing precision by histogramming inter-state-change intervals. Use it to confirm the USB 1ms precision floor and find the optimal poll rate for your setup:
+There is also an `smx-input-timing` probe that verifies how fast input reports actually arrive. It runs in all-packets mode and reports each pad's arrival rate plus an inter-arrival histogram:
 
 ```bash
-cargo run --features sample --bin smx-input-timing -- [poll_sleep_us]
-# default: 250us; press up/down to adjust live, r to reset, q to quit
+cargo run --features sample --bin smx-input-timing
+# press r to reset, q to quit
 ```
 
-Full Speed USB delivers one HID report per 1ms frame -- the hard precision floor for step timing regardless of firmware sampling rate. The histogram shows genuine inter-change intervals above that floor; OS drain artifacts (two buffered reports read back-to-back, appearing sub-1ms apart) are counted separately. Polling at 2000Hz (500us) is the sweet spot: catches each report within half a USB frame for max 1.5ms total latency; diminishing returns past 4000Hz (250us).
+Input reads are interrupt-driven: each pad's poll thread blocks on the device and wakes the instant a report arrives, so a connected pad streams at close to the USB frame rate. Full Speed USB delivers one HID report per 1ms frame -- the hard precision floor for step timing regardless of firmware sampling rate -- so a healthy pad shows ~1000 reports/sec and the histogram clusters at ~1ms.
 
 ## Testing
 

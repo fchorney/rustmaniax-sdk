@@ -63,6 +63,14 @@ impl HidDevice for RecordingDevice {
         Ok(n)
     }
 
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, SmxError> {
+        let n = self.device.read_timeout(buf, timeout_ms)?;
+        if n > 0 {
+            self.sink.write_record(b'R', &buf[..n]);
+        }
+        Ok(n)
+    }
+
     fn write(&self, buf: &[u8]) -> Result<usize, SmxError> {
         let n = self.device.write(buf)?;
         if n > 0 {

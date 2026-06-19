@@ -168,6 +168,21 @@ impl HidDevice for FakeDevice {
         }
     }
 
+    // Mirror hidapi's read_timeout: return queued data immediately, otherwise
+    // wait (so a manager's per-pad poll thread parks instead of busy-spinning on
+    // this fake). The wait is capped at 1ms because a real pad streams an input
+    // report every ~1ms USB frame, so the real poll thread wakes that often and
+    // drains command/config responses within a frame. Sleeping the full timeout
+    // here would model a device far less responsive than any real one and starve
+    // tests that expect prompt response turnaround.
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, SmxError> {
+        let n = self.read(buf)?;
+        if n == 0 && timeout_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis((timeout_ms as u64).min(1)));
+        }
+        Ok(n)
+    }
+
     fn write(&self, buf: &[u8]) -> Result<usize, SmxError> {
         let mut inner = self.inner.lock().unwrap();
         if inner.fail_writes {
@@ -435,6 +450,18 @@ impl HidDevice for ReplayDevice {
             }
         }
         Ok(0)
+    }
+
+    // Reads are write-gated, but mirror hidapi's blocking semantics so a per-pad
+    // poll thread parks (instead of busy-spinning) while no read is yet available.
+    // Capped at 1ms for the same reason as FakeDevice: a real pad streams a report
+    // each ~1ms USB frame, so the poll thread wakes about that often.
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, SmxError> {
+        let n = self.read(buf)?;
+        if n == 0 && timeout_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis((timeout_ms as u64).min(1)));
+        }
+        Ok(n)
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, SmxError> {

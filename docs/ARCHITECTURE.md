@@ -18,28 +18,30 @@ This document describes the internal architecture of the Rust SDK. For the USB p
 │                         SmxManager                                       │
 │                                                                         │
 │   - Owns SmxDevice[2] (one per pad slot)                                │
-│   - Spawns USB polling thread + main I/O thread                         │
+│   - Spawns one poll thread per connected pad + main I/O thread          │
 │   - Handles device discovery and ordering                               │
 │   - Routes API calls to the correct SmxDevice                           │
-│   - Poll-handle + enumerator locks kept off the state lock (see below)  │
+│   - Poll-thread + enumerator locks kept off the state lock (see below)  │
 └───────────┬─────────────────────────────────┬───────────────────────────┘
             │                                 │
             ▼                                 ▼
 ┌───────────────────────────┐   ┌───────────────────────────────────────┐
-│   USB Polling Thread       │   │   Main I/O Thread                     │
-│   (~1ms cycle)             │   │   (~50ms cycle)                       │
-│                            │   │                                       │
-│   PollHandle::poll()       │   │   attempt_connections()               │
-│   ├─ Read HID packets      │   │   SmxDevice::update() per device      │
-│   ├─ Report 3 → atomic     │   │   ├─ CommandHandle::update()          │
-│   │  input_state update    │   │   │  ├─ check_reads() [Report 6]     │
-│   │  → fires SmxEvent::    │   │   │  └─ check_writes() [send cmds]   │
-│   │    InputState callback │   │   ├─ handle_packets() [config/data]   │
-│   └─ Report 6 → mutex      │   │   ├─ send_config_if_needed()         │
-│      buffer for main thread │   │   └─ update_sensor_test_mode()       │
-│                            │   │   correct_device_order()              │
-│   Wakes main thread on     │   │   send_pending_lights()               │
-│   Report 6 data or errors  │   │   Fire Connected/ConfigUpdated events │
+│   Per-Pad Poll Thread      │   │   Main I/O Thread                     │
+│   (one per pad,            │   │   (~50ms cycle)                       │
+│    interrupt-driven)       │   │                                       │
+│                            │   │   attempt_connections()               │
+│   PollHandle::poll(t)      │   │   SmxDevice::update() per device      │
+│   ├─ Blocking first read   │   │   ├─ CommandHandle::update()          │
+│   │  (wakes on a report)   │   │   │  ├─ check_reads() [Report 6]     │
+│   ├─ Drain rest non-block  │   │   │  └─ check_writes() [send cmds]   │
+│   ├─ Report 3 → atomic     │   │   ├─ handle_packets() [config/data]   │
+│   │  input_state update    │   │   ├─ send_config_if_needed()         │
+│   │  → fires SmxEvent::    │   │   └─ update_sensor_test_mode()       │
+│   │    InputState callback │   │   correct_device_order()              │
+│   └─ Report 6 → mutex      │   │   send_pending_lights()               │
+│      buffer for main thread │   │   Fire Connected/ConfigUpdated events │
+│   Wakes main thread on     │   │                                       │
+│   Report 6 data or errors  │   │                                       │
 └───────────────────────────┘   └───────────────────────────────────────┘
             │                                 │
             └────────────────┬────────────────┘
@@ -53,8 +55,8 @@ This document describes the internal architecture of the Rust SDK. For the USB p
 │   - AtomicBool had_read_error                                           │
 │   - Mutex<Vec<u8>> report6_buffer (USB thread → main thread)            │
 │                                                                         │
-│   PollHandle (USB thread only):                                         │
-│   - poll() → reads HID, updates atomics, buffers Report 6              │
+│   PollHandle (poll thread only):                                        │
+│   - poll(t) → blocks for a report, drains, updates atomics, buffers R6  │
 │                                                                         │
 │   CommandHandle (main thread only):                                     │
 │   - send_command() → queues commands                                    │
@@ -76,14 +78,18 @@ This document describes the internal architecture of the Rust SDK. For the USB p
 
 ## Threading Model
 
-The SDK uses two background threads, matching the C++ SDK's design:
+The SDK runs one main I/O thread plus one poll thread per connected pad.
 
-### USB Polling Thread (~1ms cycle)
+### Per-Pad Poll Thread (interrupt-driven, one per pad)
 
-- Calls `PollHandle::poll()` for each connected device, reading on the dedicated read handle while holding only the `poll_handles` lock (never `state`) — see [Lock Hierarchy](#lock-hierarchy)
+Each connected pad gets its own poll thread, spawned on connect and reaped on read error or shutdown (`pad_poll_loop` in `manager.rs`). The thread owns its connection's `PollHandle` outright, so it touches no shared poll lock during a read — see [Lock Hierarchy](#lock-hierarchy).
+
+- Calls `PollHandle::poll(timeout_ms)`, whose first read blocks in the kernel (`hid_read_timeout`) until the device delivers a packet, so the thread wakes the instant input arrives instead of polling on a sleep. Once data is ready, the rest of the OS buffer is drained with non-blocking reads.
 - Parses Report 3 (input state) inline — updates `AtomicU16`, fires `SmxEvent::InputState` callback
 - Buffers Report 6 (command responses) in a `Mutex<Vec<u8>>` for the main thread
 - Wakes the main thread via `Condvar` when Report 6 data arrives or a read error occurs
+
+Each pad reads independently: one pad's blocking read never delays the other's, and an idle/silent pad just re-blocks (the `POLL_READ_TIMEOUT_MS` timeout only bounds how quickly a parked thread notices a stop/shutdown request, not input latency). This replaces the earlier single USB-polling thread that read both pads on a fixed ~1ms sleep cycle.
 
 ### Main I/O Thread (~50ms cycle)
 
@@ -100,7 +106,7 @@ The SDK uses two background threads, matching the C++ SDK's design:
 
 ```
 ManagerShared::state (Mutex)        — manager/connection state, device updates, API calls
-ManagerShared::poll_handles (Mutex) — the USB poll thread's read handles
+ManagerShared::poll_threads (Mutex) — the per-pad poll thread handles + stop flags
 ManagerShared::enumerator (Mutex)   — held only during enumerate/open calls
 SharedState::report6_buffer (Mutex) — held briefly for the buffer handoff
 ```
@@ -108,18 +114,18 @@ SharedState::report6_buffer (Mutex) — held briefly for the buffer handoff
 Two design choices keep input reads off the write path, so a blocking USB write never stalls them:
 
 - **Separate read/write HID handles.** Each device is opened twice. `PollHandle` owns a read handle (used only by `poll()`); `CommandHandle` owns a write handle (used only by `update()` / `send_command()`). Independent OS handles let a read and a write run concurrently instead of serializing on one `Arc<Mutex<HidDevice>>`. On macOS the `macos-shared-device` hidapi feature is enabled so the second open is allowed; Linux and Windows already permit shared opens.
-- **Poll handles off the state lock.** The USB polling thread takes only `poll_handles` — never `state` — so the main thread holding `state` across a blocking write can't stall polling. The main thread takes both (lock order `state → poll_handles`) only when it connects, disconnects, or reorders a device (the moments it mutates the read handles the poll thread reads). The poll thread never takes `state`, so the ordering is deadlock-free.
+- **Each poll thread owns its read handle.** A poll thread holds no shared lock during its (blocking) read — it owns the `PollHandle` for its pad's lifetime. `poll_threads` holds only the thread/stop bookkeeping; the main thread takes it (lock order `state → poll_threads`) only briefly to spawn on connect, reap on read error, swap on reorder, or join on shutdown. A reorder just swaps the two `poll_threads` entries to stay index-aligned with `state.devices`; the threads keep reading their own devices, and events still report the right pad because the input callback reads the shared pad-index atomic. The poll threads never take `state`, so the ordering is deadlock-free.
 
-The `SmxEvent::InputState` callback fires from `poll()` while `poll_handles` is held; per the event-based design (see [DESIGN_DIFFERENCES.md](DESIGN_DIFFERENCES.md)) the callback must not call back into the manager.
+The `SmxEvent::InputState` callback fires from `poll()` on the pad's poll thread; per the event-based design (see [DESIGN_DIFFERENCES.md](DESIGN_DIFFERENCES.md)) the callback must not call back into the manager.
 
-The enumerator has its own lock so that HID enumeration (potentially slow on some platforms) doesn't block the USB polling thread or API calls.
+The enumerator has its own lock so that HID enumeration (potentially slow on some platforms) doesn't block the poll threads or API calls.
 
 ## Event Flow
 
 ```
 Panel pressed on hardware
     → USB device sends Report 3 packet
-    → USB polling thread reads it in PollHandle::poll()
+    → the pad's poll thread, blocked in PollHandle::poll(), wakes on the packet
     → AtomicU16 updated, input callback fires
     → Application receives SmxEvent::InputState { pad, state }
 ```
@@ -154,5 +160,5 @@ See [DESIGN_DIFFERENCES.md](DESIGN_DIFFERENCES.md) for the full list. The most s
 - **Split connection** instead of single class with threading documentation
 - **Event-based callbacks** with data attached (no calling back into the manager)
 - **`Arc<AtomicUsize>` pad index** that updates dynamically after device reordering
-- **Separate enumerator lock** so enumeration doesn't block USB polling
+- **Separate enumerator lock** so enumeration doesn't block the poll threads
 - **No global singleton** — `SmxManager` is an owned value

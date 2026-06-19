@@ -16,6 +16,12 @@ use crate::protocol::{
 pub trait HidDevice: Send {
     /// Non-blocking read. Returns number of bytes read, 0 if no data, or error.
     fn read(&self, buf: &mut [u8]) -> Result<usize, SmxError>;
+    /// Blocking read that waits up to `timeout_ms` for a packet, then returns the
+    /// bytes read (0 if it timed out with no data). A negative timeout blocks
+    /// indefinitely. This is what makes input reads interrupt-driven: the kernel
+    /// wakes the caller the moment the device delivers data instead of returning
+    /// immediately to a poll-and-sleep loop.
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, SmxError>;
     /// Write a packet. Returns number of bytes written or error.
     fn write(&self, buf: &[u8]) -> Result<usize, SmxError>;
 }
@@ -43,6 +49,10 @@ pub struct HidapiDevice {
 impl HidDevice for HidapiDevice {
     fn read(&self, buf: &mut [u8]) -> Result<usize, SmxError> {
         Ok(self.dev.read(buf)?)
+    }
+
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, SmxError> {
+        Ok(self.dev.read_timeout(buf, timeout_ms)?)
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, SmxError> {
@@ -170,16 +180,30 @@ pub struct PollHandle {
 
 impl PollHandle {
     /// Polls for available USB data. Returns true if Report 6 data was buffered.
-    pub fn poll(&self) -> bool {
+    ///
+    /// The first read blocks in the kernel for up to `first_read_timeout_ms`, so
+    /// the caller is woken the instant the device delivers a packet (interrupt
+    /// style) instead of spinning. Once data arrives, the rest of the OS read
+    /// buffer is drained with non-blocking reads. With no data the first read
+    /// times out and this returns `false`, having already provided the wait.
+    pub fn poll(&self, first_read_timeout_ms: i32) -> bool {
         if self.shared.had_read_error.load(Ordering::Relaxed) {
             return false;
         }
 
         let mut report6_local: Vec<u8> = Vec::new();
         let mut buf = [0u8; HID_PACKET_SIZE];
+        let mut first = true;
 
         loop {
-            let n = match self.device.read(&mut buf) {
+            // Block only on the first read; drain the rest non-blocking.
+            let result = if first {
+                first = false;
+                self.device.read_timeout(&mut buf, first_read_timeout_ms)
+            } else {
+                self.device.read(&mut buf)
+            };
+            let n = match result {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(_) => {
@@ -644,7 +668,7 @@ mod tests {
         let dev = FakeDevice::new();
         dev.queue_input_state(0x0010);
         let (poll, cmd) = open_fake(dev);
-        poll.poll();
+        poll.poll(0);
         assert_eq!(cmd.input_state(), 0x0010);
     }
 
@@ -653,7 +677,7 @@ mod tests {
         let dev = FakeDevice::new();
         dev.queue_input_state(0x0111);
         let (poll, cmd) = open_fake(dev);
-        poll.poll();
+        poll.poll(0);
         assert_eq!(cmd.input_state(), 0x0111);
     }
 
@@ -669,7 +693,7 @@ mod tests {
             dev,
             Box::new(move |_| { count_clone.fetch_add(1, Ordering::Relaxed); }),
         );
-        poll.poll();
+        poll.poll(0);
         // Only fires once for the change from 0 to 0x0001, not for duplicate.
         assert_eq!(count.load(Ordering::Relaxed), 1);
     }
@@ -687,7 +711,7 @@ mod tests {
             Box::new(move |_| { count_clone.fetch_add(1, Ordering::Relaxed); }),
         );
         cmd.set_always_fire_input(true);
-        poll.poll();
+        poll.poll(0);
         assert_eq!(count.load(Ordering::Relaxed), 2);
     }
 
@@ -695,7 +719,7 @@ mod tests {
     fn poll_returns_false_when_no_data() {
         let dev = FakeDevice::new();
         let (poll, _cmd) = open_fake(dev.clone());
-        assert!(!poll.poll());
+        assert!(!poll.poll(0));
         assert!(dev.clone().read(&mut [0; 64]).is_ok());
     }
 
@@ -704,7 +728,7 @@ mod tests {
         let dev = FakeDevice::new();
         let (poll, cmd) = open_fake(dev.clone());
         dev.set_fail_reads(true);
-        poll.poll();
+        poll.poll(0);
         assert!(cmd.has_read_error());
     }
 
@@ -713,7 +737,7 @@ mod tests {
         let dev = FakeDevice::new();
         dev.queue_input_state(0x00FF);
         let (poll, mut cmd) = open_fake(dev);
-        poll.poll();
+        poll.poll(0);
         assert_eq!(cmd.input_state(), 0x00FF);
         cmd.close();
         // Input state is in shared atomic — still readable but device is closed.
@@ -729,7 +753,7 @@ mod tests {
         );
         let (poll, mut cmd) = open_fake(dev);
         cmd.set_active(true);
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
         let pkt = cmd.read_packet().unwrap();
         assert_eq!(pkt, b"AB");
@@ -742,7 +766,7 @@ mod tests {
         dev.queue_report6(PACKET_FLAG_END_OF_COMMAND, b" W");
         let (poll, mut cmd) = open_fake(dev);
         cmd.set_active(true);
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
         let pkt = cmd.read_packet().unwrap();
         assert_eq!(pkt, b"Hello W");
@@ -758,7 +782,7 @@ mod tests {
         dev.queue_report6(PACKET_FLAG_END_OF_COMMAND, b"!");
         let (poll, mut cmd) = open_fake(dev);
         cmd.set_active(true);
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
         let pkt = cmd.read_packet().unwrap();
         assert_eq!(pkt, b"new!");
@@ -773,7 +797,7 @@ mod tests {
         );
         let (poll, mut cmd) = open_fake(dev);
         // Don't set active.
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
         assert!(cmd.read_packet().is_none());
     }
@@ -791,7 +815,7 @@ mod tests {
 
         // Now queue the response (simulating device replying).
         dev.queue_device_info_response(false, 7, &serial);
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
 
         assert!(cmd.is_connected_with_info());
@@ -810,7 +834,7 @@ mod tests {
         cmd.update().unwrap();
 
         dev.queue_device_info_response(true, 3, &serial);
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
 
         let info = cmd.device_info();
@@ -827,7 +851,7 @@ mod tests {
         let (poll, mut cmd) = open_fake(dev.clone());
         // Complete handshake first.
         cmd.update().unwrap();
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
 
         cmd.send_command(b"hello", None);
@@ -854,7 +878,7 @@ mod tests {
 
         let (poll, mut cmd) = open_fake(dev.clone());
         cmd.update().unwrap();
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
         cmd.set_active(true);
 
@@ -870,7 +894,7 @@ mod tests {
             PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED,
             b"Gcfg",
         );
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
 
         assert_eq!(*response.lock().unwrap(), b"Gcfg");
@@ -884,7 +908,7 @@ mod tests {
 
         let (poll, mut cmd) = open_fake(dev.clone());
         cmd.update().unwrap();
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
 
         // Queue two commands.
@@ -907,7 +931,7 @@ mod tests {
 
         let (poll, mut cmd) = open_fake(dev);
         cmd.update().unwrap();
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
 
         let called = Arc::new(AtomicU32::new(0));
@@ -931,7 +955,7 @@ mod tests {
 
         let (poll, mut cmd) = open_fake(dev.clone());
         cmd.update().unwrap();
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
 
         dev.set_fail_writes(true);
@@ -986,7 +1010,7 @@ mod auto_tests {
 
         // Cycle: update sends request, write triggers auto-response, poll reads it, update processes.
         cmd.update().unwrap();
-        poll.poll();
+        poll.poll(0);
         cmd.update().unwrap();
         assert!(cmd.is_connected_with_info(), "device info not received");
         assert_eq!(cmd.device_info().firmware_version, 5);

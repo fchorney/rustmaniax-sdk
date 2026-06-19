@@ -7,7 +7,7 @@ This document explains the architectural and design decisions that differ betwee
 **C++:** `SMXDeviceConnection` is a single class accessed by two threads. The USB polling thread calls `PollUSBData()` and the main I/O thread calls `Update()`/`SendCommand()`. Thread safety is managed by careful documentation, atomics, and a mutex on the Report 6 buffer.
 
 **Rust:** The connection is split into two separate types at construction time:
-- `PollHandle` — owned by the USB polling thread; reads only (owns the device's *read* HID handle)
+- `PollHandle` — owned by the pad's poll thread; reads only (owns the device's *read* HID handle)
 - `CommandHandle` — owned by the main I/O thread; sends commands and processes responses (owns the device's *write* HID handle)
 
 They share input and coordination state through `Arc` (`AtomicU16` input state, `AtomicBool` flags, `Mutex<Vec<u8>>` Report 6 buffer), but **not** the HID handle — each owns its own.

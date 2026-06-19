@@ -62,7 +62,6 @@ fn main() {
     let mut test_mode = false;
     let mut sensor_mode = SensorTestMode::Off;
     let mut main_ms: Option<i32> = None;
-    let mut usb_us: Option<i32> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -74,16 +73,14 @@ fn main() {
             "--noise" => sensor_mode = SensorTestMode::Noise,
             "--tare" => sensor_mode = SensorTestMode::Tare,
             s if !s.starts_with('-') && main_ms.is_none() => main_ms = s.parse().ok(),
-            s if !s.starts_with('-') && usb_us.is_none() => usb_us = s.parse().ok(),
             _ => {}
         }
         i += 1;
     }
 
     if let Some(ms) = main_ms {
-        let us = usb_us.unwrap_or(1000);
-        mgr.set_polling_rate(ms, us);
-        println!("Polling rate: main thread {ms}ms, USB thread {us}us");
+        mgr.set_main_thread_sleep_ms(ms);
+        println!("Main thread sleep: {ms}ms");
     }
 
     if all_packets {
@@ -112,7 +109,7 @@ fn main() {
 
     println!("Scanning for StepManiaX devices... Press Ctrl+C to quit.");
     println!(
-        "Usage: {} [main_thread_ms] [usb_polling_us] [--all-packets] [--test-mode]",
+        "Usage: {} [main_thread_ms] [--all-packets] [--test-mode]",
         args[0]
     );
     println!("       [--uncalibrated] [--calibrated] [--noise] [--tare]");

@@ -49,6 +49,16 @@ pub const LIGHTS_FRAME_INTERVAL: f64 = 1.0 / 30.0;
 pub const LIGHTS_LEGACY_COMMAND_DELAY: f64 = 1.0 / 60.0;
 pub const ANIMATION_PAUSE_DURATION: f64 = 0.1;
 
+// Blocking timeout (milliseconds) for the first read of each per-pad poll cycle.
+// The poll thread blocks in the kernel here until the device delivers a packet,
+// so an input report wakes the thread the instant it arrives (interrupt-style)
+// rather than after a fixed poll sleep. This value does NOT bound input latency:
+// a connected pad streams reports (up to ~1000Hz) so the read returns almost
+// immediately. It only caps how long the thread stays parked when the device is
+// silent, which bounds how quickly it notices a stop/shutdown request. Small
+// enough for prompt shutdown, large enough that an idle pad barely wakes.
+pub const POLL_READ_TIMEOUT_MS: i32 = 10;
+
 // Serial number size in bytes (raw binary, before hex encoding).
 pub const SERIAL_SIZE: usize = 16;
 
