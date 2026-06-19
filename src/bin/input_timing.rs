@@ -1,13 +1,17 @@
-//! USB input rate probe.
+//! USB input resolution probe.
 //!
-//! Verifies how fast input reports actually reach the SDK now that reads are
-//! interrupt-driven (each pad's poll thread blocks on the device and wakes the
-//! instant a report arrives). Runs in all-packets mode so every Report 3 fires
-//! an event, then reports per-pad arrival rate and an inter-arrival histogram.
+//! Confirms the interrupt-driven read path resolves input at the USB frame floor
+//! (~1ms), now that each pad's poll thread blocks on the device and wakes the
+//! instant a report arrives. Runs in change-only mode, so the callback fires on
+//! real panel-state transitions: the ~10Hz idle heartbeat and same-state repeats
+//! are dropped, and every recorded event is a genuine input change.
 //!
-//! Full Speed USB delivers one report per 1ms frame, so a healthy connected pad
-//! streams at ~1000 reports/sec and the histogram clusters at ~1ms. That 1ms
-//! frame is the precision floor regardless of firmware sampling rate.
+//! A human can't generate 1000 changes/sec, so this is not about report volume.
+//! It is about resolution: when two genuine changes land a frame apart (a jump
+//! hitting two panels, a fast roll, sensor flicker), do they arrive ~1ms apart
+//! rather than coalesced or delayed to the next heartbeat? The Min gap and the
+//! sub-2ms histogram buckets are the answer. Full Speed USB delivers one report
+//! per 1ms frame, so ~1ms is the floor regardless of firmware sampling rate.
 //!
 //! Run: cargo run --features sample --bin smx-input-timing
 
@@ -144,7 +148,7 @@ fn render_histogram(stdout: &mut impl Write, p: &PadStats, show: usize) {
 fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats) {
     writeln!(
         stdout,
-        "Pad {pad}:  {:.0} reports/sec  ({} reports total)\r",
+        "Pad {pad}:  {:.0} changes/sec  ({} changes total)\r",
         p.rate_hz, p.reports
     )
     .ok();
@@ -156,7 +160,13 @@ fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats) {
     }
 
     if p.min_us < u64::MAX {
-        writeln!(stdout, "  Min gap  : {:6} us\r", p.min_us).ok();
+        writeln!(
+            stdout,
+            "  Min gap  : {:6} us  ({:.0} Hz peak resolution)\r",
+            p.min_us,
+            1_000_000.0 / p.min_us.max(1) as f64
+        )
+        .ok();
     }
     if let Some(mean) = p.mean_us() {
         writeln!(stdout, "  Mean gap : {:6.0} us  ({:.0} Hz)\r", mean, 1_000_000.0 / mean).ok();
@@ -199,9 +209,11 @@ fn main() {
     })
     .expect("Failed to initialize HID");
 
-    // Fire on every Report 3 (not just changes) so the histogram reflects the
-    // raw report arrival rate, which is what we want to verify.
-    mgr.set_input_state_mode(true);
+    // Change-only mode (the SDK default, set explicitly here for clarity): the
+    // callback fires on real panel-state transitions only. The ~10Hz idle
+    // heartbeat and same-state repeats are dropped, so every event we record is
+    // a genuine input change and the inter-arrival reflects change resolution.
+    mgr.set_input_state_mode(false);
 
     terminal::enable_raw_mode().expect("enable raw mode");
     let mut stdout = io::stdout();
@@ -235,10 +247,10 @@ fn main() {
         let s = stats.lock().unwrap();
 
         execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All)).ok();
-        writeln!(stdout, "SMX Input Rate Probe  [r: reset, q: quit]\r").ok();
+        writeln!(stdout, "SMX Input Resolution Probe  [r: reset, q: quit]\r").ok();
         writeln!(
             stdout,
-            "Interrupt-driven reads, all-packets mode. ~1000 reports/sec = 1ms USB frame (the floor).\r"
+            "Change-only mode. A Min gap near ~1ms confirms input resolves at the USB frame floor.\r"
         )
         .ok();
         writeln!(stdout, "\r").ok();
@@ -267,11 +279,15 @@ fn main() {
                 continue;
             }
             summary.push(format!(
-                "Pad {pad}:  {:.0} reports/sec ({} reports total)",
+                "Pad {pad}:  {:.0} changes/sec ({} changes total)",
                 p.rate_hz, p.reports
             ));
             if p.min_us < u64::MAX {
-                summary.push(format!("  Min gap  : {} us", p.min_us));
+                summary.push(format!(
+                    "  Min gap  : {} us ({:.0} Hz peak resolution)",
+                    p.min_us,
+                    1_000_000.0 / p.min_us.max(1) as f64
+                ));
             }
             if let Some(mean) = p.mean_us() {
                 summary.push(format!("  Mean gap : {mean:.0} us ({:.0} Hz)", 1_000_000.0 / mean));
