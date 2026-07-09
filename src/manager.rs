@@ -728,7 +728,27 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
             }) as Box<dyn Fn(u16) + Send>)
         };
 
-        match connection::open_connection(dev_info.path, read_device, write_device, input_cb) {
+        // Wake the main loop the moment a command's packets are on the wire, so
+        // the next command (lights stream pacing) isn't left waiting out the
+        // loop interval. Weak: the writer thread must not keep the manager
+        // alive (the CommandHandle that feeds it lives inside `shared.state`,
+        // which would make that a cycle).
+        let write_done_notify = {
+            let weak = Arc::downgrade(shared);
+            Some(Box::new(move || {
+                if let Some(s) = weak.upgrade() {
+                    s.wake.notify_all();
+                }
+            }) as Box<dyn Fn() + Send>)
+        };
+
+        match connection::open_connection(
+            dev_info.path,
+            read_device,
+            write_device,
+            input_cb,
+            write_done_notify,
+        ) {
             Ok((poll_handle, cmd_handle)) => {
                 if state.always_fire_input {
                     cmd_handle.set_always_fire_input(true);

@@ -883,6 +883,7 @@ mod tests {
             Box::new(fake.clone()),
             Box::new(fake),
             None,
+            None,
         ).unwrap();
 
         let mut device = SmxDevice::new(0);
@@ -891,6 +892,9 @@ mod tests {
         // Connect.
         for _ in 0..20 {
             device.update().unwrap();
+            // Writes are async now; give the writer thread a beat so the fake
+            // device's write-triggered response is queued before the poll.
+            std::thread::sleep(std::time::Duration::from_millis(1));
             poll.poll(0);
             if device.is_connected() { break; }
         }
@@ -933,6 +937,7 @@ mod integration_tests {
             Box::new(fake.clone()),
             Box::new(fake),
             None,
+            None,
         )
         .unwrap();
 
@@ -942,6 +947,9 @@ mod integration_tests {
         // Simulate the manager loop: update then poll, repeat.
         for _ in 0..20 {
             device.update().unwrap();
+            // Writes are async now; give the writer thread a beat so the fake
+            // device's write-triggered response is queued before the poll.
+            std::thread::sleep(std::time::Duration::from_millis(1));
             poll.poll(0);
             if device.is_connected() {
                 break;
