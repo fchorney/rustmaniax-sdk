@@ -259,7 +259,14 @@ mod tests {
 
     #[test]
     fn parse_report6_device_info() {
-        let mut raw = vec![HID_REPORT_DATA, PACKET_FLAG_DEVICE_INFO, 3, 0xAA, 0xBB, 0xCC];
+        let mut raw = vec![
+            HID_REPORT_DATA,
+            PACKET_FLAG_DEVICE_INFO,
+            3,
+            0xAA,
+            0xBB,
+            0xCC,
+        ];
         let parsed = parse_report6(&raw).unwrap();
         match parsed {
             ParsedPacket::DeviceInfo(payload) => assert_eq!(payload, vec![0xAA, 0xBB, 0xCC]),
@@ -377,7 +384,9 @@ mod tests {
             HID_REPORT_DATA,
             PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED,
             3,
-            0x01, 0x02, 0x03,
+            0x01,
+            0x02,
+            0x03,
         ];
         let parsed = parse_report6(&raw).unwrap();
         match parsed {

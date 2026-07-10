@@ -87,8 +87,12 @@ impl PadStats {
             } else {
                 self.overflow += 1;
             }
-            if us < self.min_us { self.min_us = us; }
-            if us > self.max_us { self.max_us = us; }
+            if us < self.min_us {
+                self.min_us = us;
+            }
+            if us > self.max_us {
+                self.max_us = us;
+            }
             self.sum_us += us;
             self.interval_count += 1;
         }
@@ -133,7 +137,8 @@ fn render_histogram(stdout: &mut impl Write, p: &PadStats, show: usize) {
         writeln!(
             stdout,
             "  {:5.2}ms [{:7}] {}\r",
-            ms, count,
+            ms,
+            count,
             "█".repeat(bar_len)
         )
         .ok();
@@ -169,7 +174,13 @@ fn print_pad(stdout: &mut impl Write, pad: usize, p: &PadStats) {
         .ok();
     }
     if let Some(mean) = p.mean_us() {
-        writeln!(stdout, "  Mean gap : {:6.0} us  ({:.0} Hz)\r", mean, 1_000_000.0 / mean).ok();
+        writeln!(
+            stdout,
+            "  Mean gap : {:6.0} us  ({:.0} Hz)\r",
+            mean,
+            1_000_000.0 / mean
+        )
+        .ok();
     }
     if p.max_us > 0 {
         writeln!(stdout, "  Max gap  : {:6} us\r", p.max_us).ok();
@@ -191,8 +202,7 @@ fn main() {
     env_logger::init();
 
     let running = Arc::new(AtomicBool::new(true));
-    let stats: Arc<Mutex<[PadStats; 2]>> =
-        Arc::new(Mutex::new([PadStats::new(), PadStats::new()]));
+    let stats: Arc<Mutex<[PadStats; 2]>> = Arc::new(Mutex::new([PadStats::new(), PadStats::new()]));
 
     let stats_cb = Arc::clone(&stats);
     let mgr = SmxManager::start(move |event| match event {
@@ -290,13 +300,19 @@ fn main() {
                 ));
             }
             if let Some(mean) = p.mean_us() {
-                summary.push(format!("  Mean gap : {mean:.0} us ({:.0} Hz)", 1_000_000.0 / mean));
+                summary.push(format!(
+                    "  Mean gap : {mean:.0} us ({:.0} Hz)",
+                    1_000_000.0 / mean
+                ));
             }
             if p.max_us > 0 {
                 summary.push(format!("  Max gap  : {} us", p.max_us));
             }
             let show = p.summary_show_buckets();
-            summary.push(format!("  Inter-arrival histogram ({}us buckets):", BUCKET_US));
+            summary.push(format!(
+                "  Inter-arrival histogram ({}us buckets):",
+                BUCKET_US
+            ));
             for i in 0..show {
                 if p.buckets[i] > 0 {
                     let ms = i as f64 * BUCKET_US as f64 / 1_000.0;

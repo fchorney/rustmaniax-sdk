@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 use crate::connection::{self, HidEnumerator, HidapiEnumerator, PollHandle};
 use crate::device::{SmxDevice, SmxEvent, SmxInfo};
 use crate::protocol::{
-    BYTES_PER_PAD_16, BYTES_PER_PAD_25, ENUMERATION_INTERVAL_SECONDS,
-    LEGACY_LIGHTS_PAYLOAD_SIZE, LIGHTS_FRAME_INTERVAL, LIGHTS_LEGACY_COMMAND_DELAY, NUM_PANELS,
-    PANEL_TEST_REFRESH_SECONDS, PLATFORM_STRIP_LEDS, SERIAL_SIZE, SMX_USB_PRODUCT_ID,
-    SMX_USB_PRODUCT_STRING, SMX_USB_VENDOR_ID,
+    BYTES_PER_PAD_16, BYTES_PER_PAD_25, ENUMERATION_INTERVAL_SECONDS, LEGACY_LIGHTS_PAYLOAD_SIZE,
+    LIGHTS_FRAME_INTERVAL, LIGHTS_LEGACY_COMMAND_DELAY, NUM_PANELS, PANEL_TEST_REFRESH_SECONDS,
+    PLATFORM_STRIP_LEDS, SERIAL_SIZE, SMX_USB_PRODUCT_ID, SMX_USB_PRODUCT_STRING,
+    SMX_USB_VENDOR_ID,
 };
 
 /// Panel-side diagnostic test modes.
@@ -120,7 +120,9 @@ impl SmxManager {
     /// Creates a manager using the real hidapi enumerator.
     /// If `SMX_CAPTURE_DIR` is set, wraps it with a recording layer that writes
     /// `.smxhid` files directly into that directory (overwriting previous captures).
-    pub fn start(callback: impl Fn(SmxEvent) + Send + Sync + 'static) -> Result<Self, crate::error::SmxError> {
+    pub fn start(
+        callback: impl Fn(SmxEvent) + Send + Sync + 'static,
+    ) -> Result<Self, crate::error::SmxError> {
         let enumerator: Box<dyn HidEnumerator> = {
             let real = Box::new(HidapiEnumerator::new()?);
             match std::env::var("SMX_CAPTURE_DIR") {
@@ -234,7 +236,9 @@ impl SmxManager {
     /// blocks on the device and wakes the instant a report arrives, so there is no
     /// USB poll rate to tune.
     pub fn set_main_thread_sleep_ms(&self, main_thread_ms: i32) {
-        self.shared.main_thread_sleep_ms.store(main_thread_ms, Ordering::Relaxed);
+        self.shared
+            .main_thread_sleep_ms
+            .store(main_thread_ms, Ordering::Relaxed);
     }
 
     /// Re-enables automatic panel lighting on both pads.
@@ -260,6 +264,11 @@ impl SmxManager {
             cmd.pad_command_len[pad] = 0;
         }
         if let Some(conn) = state.devices[pad].connection_mut() {
+            // The main thread loop can have already moved a frame out of the staging
+            // list above and into this pad's own connection queue before we got the
+            // lock; drop it there too, or a queued frame still lands and immediately
+            // re-disables the lighting we're enabling.
+            conn.drop_queued_lights();
             conn.send_command(b"S 1\n", None);
         }
     }
@@ -313,7 +322,9 @@ impl SmxManager {
     pub fn set_serial_numbers(&self) {
         let mut state = self.shared.state.lock().unwrap();
         for device in &mut state.devices {
-            let Some(conn) = device.connection_mut() else { continue };
+            let Some(conn) = device.connection_mut() else {
+                continue;
+            };
             let mut cmd = Vec::with_capacity(1 + SERIAL_SIZE + 1);
             cmd.push(b's');
             cmd.extend_from_slice(&generate_serial());
@@ -332,7 +343,9 @@ impl SmxManager {
             if !state.devices[pad].is_connected() {
                 continue;
             }
-            let Some(config) = state.devices[pad].get_config() else { continue };
+            let Some(config) = state.devices[pad].get_config() else {
+                continue;
+            };
             if config.master_version < 4 {
                 continue;
             }
@@ -366,8 +379,9 @@ impl SmxManager {
     pub fn set_lights_for_pads(&self, light_data: &[u8], pads: [bool; 2]) {
         // Pause auto-animation when lights are set directly.
         if self.shared.anim_running.load(Ordering::Relaxed) {
-            *self.shared.anim_pause_until.lock().unwrap() =
-                Some(Instant::now() + Duration::from_secs_f64(crate::protocol::ANIMATION_PAUSE_DURATION));
+            *self.shared.anim_pause_until.lock().unwrap() = Some(
+                Instant::now() + Duration::from_secs_f64(crate::protocol::ANIMATION_PAUSE_DURATION),
+            );
         }
         let mut state = self.shared.state.lock().unwrap();
         set_lights_inner(&mut state, light_data, pads);
@@ -394,7 +408,8 @@ impl SmxManager {
             }
             self.shared.anim_running.store(true, Ordering::Relaxed);
             let shared = Arc::clone(&self.shared);
-            *self.anim_thread.lock().unwrap() = Some(thread::spawn(move || animation_thread_loop(shared)));
+            *self.anim_thread.lock().unwrap() =
+                Some(thread::spawn(move || animation_thread_loop(shared)));
         } else {
             if !self.shared.anim_running.load(Ordering::Relaxed) {
                 return; // Not running.
@@ -427,7 +442,12 @@ impl SmxManager {
     /// Sends a raw command to a pad. Used for animation upload and other low-level operations.
     /// This is not part of the stable public API.
     #[doc(hidden)]
-    pub fn send_command(&self, pad: usize, cmd: &[u8], callback: Option<crate::connection::CommandCallback>) {
+    pub fn send_command(
+        &self,
+        pad: usize,
+        cmd: &[u8],
+        callback: Option<crate::connection::CommandCallback>,
+    ) {
         if pad > 1 {
             return;
         }
@@ -508,7 +528,10 @@ fn animation_thread_loop(shared: Arc<ManagerShared>) {
         let frame_start = Instant::now();
 
         // Check if paused (direct set_lights was called).
-        let paused = shared.anim_pause_until.lock().unwrap()
+        let paused = shared
+            .anim_pause_until
+            .lock()
+            .unwrap()
             .is_some_and(|until| Instant::now() < until);
         if paused {
             thread::sleep(frame_duration);
@@ -519,7 +542,10 @@ fn animation_thread_loop(shared: Arc<ManagerShared>) {
         let (input_states, has_animation) = {
             let state = shared.state.lock().unwrap();
             let _hold = crate::profile::hold(crate::profile::Site::AnimInputs);
-            let inputs = [state.devices[0].input_state(), state.devices[1].input_state()];
+            let inputs = [
+                state.devices[0].input_state(),
+                state.devices[1].input_state(),
+            ];
             let has_anim = state.devices[0].is_connected() || state.devices[1].is_connected();
             (inputs, has_anim)
         };
@@ -560,7 +586,10 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
             let mut state = shared.state.lock().unwrap();
             let _hold = crate::profile::hold(crate::profile::Site::MainUpdate);
 
-            let was_connected = [state.devices[0].is_connected(), state.devices[1].is_connected()];
+            let was_connected = [
+                state.devices[0].is_connected(),
+                state.devices[1].is_connected(),
+            ];
 
             // Update devices.
             for i in 0..2 {
@@ -628,9 +657,7 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
                     .connection()
                     .is_some_and(|c| c.has_unsent_lights())
             });
-            if !lights_gated
-                && let Some(next) = state.pending_lights.first()
-            {
+            if !lights_gated && let Some(next) = state.pending_lights.first() {
                 let until = next.send_at.saturating_duration_since(Instant::now());
                 let ms = until.as_millis() as u64 + 1;
                 wait = wait.min(ms);
@@ -650,7 +677,9 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
 
         // Wait with condvar (releases lock implicitly since we dropped state above).
         let state = shared.state.lock().unwrap();
-        let _ = shared.wake.wait_timeout(state, Duration::from_millis(wait_ms));
+        let _ = shared
+            .wake
+            .wait_timeout(state, Duration::from_millis(wait_ms));
     }
 }
 
@@ -661,8 +690,8 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
     {
         let state = shared.state.lock().unwrap();
         let _hold = crate::profile::hold(crate::profile::Site::ConnectCheck);
-        let has_slot = state.devices[0].connection().is_none()
-            || state.devices[1].connection().is_none();
+        let has_slot =
+            state.devices[0].connection().is_none() || state.devices[1].connection().is_none();
         if !has_slot {
             return;
         }
@@ -687,7 +716,9 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
     state.last_enumeration = Some(Instant::now());
 
     // Clear failed paths that are no longer in the enumeration (device was unplugged).
-    state.failed_paths.retain(|p| devs.iter().any(|d| d.path == *p));
+    state
+        .failed_paths
+        .retain(|p| devs.iter().any(|d| d.path == *p));
 
     for dev_info in devs {
         if dev_info.path.is_empty() {
@@ -702,9 +733,10 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
             continue;
         }
 
-        let already_open = state.devices.iter().any(|d| {
-            d.connection().is_some_and(|c| c.path() == dev_info.path)
-        });
+        let already_open = state
+            .devices
+            .iter()
+            .any(|d| d.connection().is_some_and(|c| c.path() == dev_info.path));
         if already_open {
             continue;
         }
@@ -756,7 +788,10 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
             let pad_index = state.devices[slot_idx].pad_index_shared();
             Some(Box::new(move |new_state: u16| {
                 let pad = pad_index.load(std::sync::atomic::Ordering::Relaxed);
-                (callback)(SmxEvent::InputState { pad, state: new_state });
+                (callback)(SmxEvent::InputState {
+                    pad,
+                    state: new_state,
+                });
             }) as Box<dyn Fn(u16) + Send>)
         };
 
@@ -793,9 +828,8 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
                 let stop = Arc::new(AtomicBool::new(false));
                 let thread_shared = Arc::clone(shared);
                 let thread_stop = Arc::clone(&stop);
-                let handle = thread::spawn(move || {
-                    pad_poll_loop(poll_handle, thread_stop, thread_shared)
-                });
+                let handle =
+                    thread::spawn(move || pad_poll_loop(poll_handle, thread_stop, thread_shared));
                 let mut threads = shared.poll_threads.lock().unwrap();
                 if let Some(old) = threads[slot_idx].take() {
                     old.stop_and_join();
@@ -941,8 +975,6 @@ fn update_panel_test_mode(state: &mut ManagerState) {
 
 // ─── Lights ──────────────────────────────────────────────────────────────────
 
-
-
 #[allow(clippy::needless_range_loop)]
 /// Builds and queues the lights commands for the pads selected by `pads`.
 ///
@@ -980,9 +1012,12 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8], pads: [bool; 2]
         let mut len2 = 0usize;
         let mut len3 = 0usize;
 
-        cmds[0][pad][len4] = b'4'; len4 += 1;
-        cmds[1][pad][len2] = b'2'; len2 += 1;
-        cmds[2][pad][len3] = b'3'; len3 += 1;
+        cmds[0][pad][len4] = b'4';
+        len4 += 1;
+        cmds[1][pad][len2] = b'2';
+        len2 += 1;
+        cmds[2][pad][len3] = b'3';
+        len3 += 1;
 
         let mut input_idx = 0;
         for _panel in 0..NUM_PANELS {
@@ -990,9 +1025,11 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8], pads: [bool; 2]
                 let color = crate::lights::scale_color(pad_data[input_idx]);
                 input_idx += 1;
                 if byte_idx < 4 * 2 * 3 {
-                    cmds[1][pad][len2] = color; len2 += 1;
+                    cmds[1][pad][len2] = color;
+                    len2 += 1;
                 } else {
-                    cmds[2][pad][len3] = color; len3 += 1;
+                    cmds[2][pad][len3] = color;
+                    len3 += 1;
                 }
             }
             if bytes_per_pad == BYTES_PER_PAD_25 {
@@ -1009,9 +1046,12 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8], pads: [bool; 2]
             }
         }
 
-        cmds[0][pad][len4] = b'\n'; len4 += 1;
-        cmds[1][pad][len2] = b'\n'; len2 += 1;
-        cmds[2][pad][len3] = b'\n'; len3 += 1;
+        cmds[0][pad][len4] = b'\n';
+        len4 += 1;
+        cmds[1][pad][len2] = b'\n';
+        len2 += 1;
+        cmds[2][pad][len3] = b'\n';
+        len3 += 1;
 
         cmd_lens[0][pad] = len4;
         cmd_lens[1][pad] = len2;
@@ -1081,7 +1121,9 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8], pads: [bool; 2]
         // Replace last 3.
         let base = state.pending_lights.len() - 3;
         for pad in 0..2 {
-            let Some(cfg) = state.devices[pad].get_config() else { continue };
+            let Some(cfg) = state.devices[pad].get_config() else {
+                continue;
+            };
             if cfg.master_version >= 4 {
                 state.pending_lights[base].pad_command[pad][..cmd_lens[0][pad]]
                     .copy_from_slice(&cmds[0][pad][..cmd_lens[0][pad]]);
@@ -1226,11 +1268,17 @@ mod tests {
         let asn = assignment("aaaa", "bbbb");
         let reversed_a = info(true, false, "bbbb");
         let reversed_b = info(true, false, "aaaa");
-        assert_eq!(override_should_swap(&asn, &reversed_a, &reversed_b), Some(true));
+        assert_eq!(
+            override_should_swap(&asn, &reversed_a, &reversed_b),
+            Some(true)
+        );
 
         let ordered_a = info(true, false, "aaaa");
         let ordered_b = info(true, false, "bbbb");
-        assert_eq!(override_should_swap(&asn, &ordered_a, &ordered_b), Some(false));
+        assert_eq!(
+            override_should_swap(&asn, &ordered_a, &ordered_b),
+            Some(false)
+        );
     }
 
     #[test]

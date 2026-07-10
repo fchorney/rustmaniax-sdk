@@ -20,7 +20,11 @@ fn main() {
                 println!(
                     "Pad {pad} connected (jumper: P{}, serial: {}, fw: {})",
                     if info.is_player2 { 2 } else { 1 },
-                    if info.has_serial_number { &info.serial } else { "(none)" },
+                    if info.has_serial_number {
+                        &info.serial
+                    } else {
+                        "(none)"
+                    },
                     info.firmware_version
                 );
                 if !info.has_serial_number {

@@ -176,7 +176,9 @@ where
     // Writer: hammer continuously (no pause) so a large share of the reader's
     // read() calls overlap an in-flight write. Time the slowest single write to
     // show writes really do block.
-    println!("Running concurrent read+write for {RUN_SECONDS}s (press the pad to generate input)...");
+    println!(
+        "Running concurrent read+write for {RUN_SECONDS}s (press the pad to generate input)..."
+    );
     let info_req = device_info_request();
     let mut writes: u64 = 0;
     let mut write_errors: u64 = 0;
@@ -213,5 +215,7 @@ where
         "slowest read() call:  {:.3}ms  <-- KEY: ~microseconds = reads independent of writes;",
         max_read_call_us.load(Ordering::Relaxed) as f64 / 1000.0
     );
-    println!("                                    near the slowest write = reads coupled to writes.");
+    println!(
+        "                                    near the slowest write = reads coupled to writes."
+    );
 }
