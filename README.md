@@ -67,6 +67,20 @@ hardware-shape constants — `NUM_PANELS`, `BYTES_PER_PAD_16/25`, `LEDS_PER_PANE
 `SMX_USB_VENDOR_ID`/`PRODUCT_ID`/`PRODUCT_STRING`, `SERIAL_SIZE` — are re-exported
 from the crate root so callers don't hardcode sizes or device identity).
 
+To light one pad and leave the other alone, use `set_lights_for_pads` with a
+per-pad selector. The buffer still covers both pads; a deselected pad receives no
+lights command, so its firmware auto-lighting resumes (a pad reverts once lights
+stop arriving). Both pads' commands are queued together either way, so the two
+never drift out of phase: driving one pad does not disturb the other's timing.
+
+```rust
+// Light P1, hand P2 back to its firmware.
+mgr.set_lights_for_pads(&frame, [true, false]);
+
+// Release a single pad now, instead of waiting out the firmware's timeout.
+mgr.reenable_auto_lights_for_pad(1);
+```
+
 ## Dependencies
 
 - **Rust** 1.85+ (edition 2024)
