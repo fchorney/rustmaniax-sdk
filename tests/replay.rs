@@ -7,7 +7,7 @@ use std::path::Path;
 use rustmaniax_sdk::SmxEvent;
 use rustmaniax_sdk::SmxManager;
 use rustmaniax_sdk::test_helpers::HID_REPORT_COMMAND;
-use rustmaniax_sdk::test_helpers::{wait_for, ReplayDevice};
+use rustmaniax_sdk::test_helpers::{ReplayDevice, wait_for};
 
 use std::sync::{Arc, Mutex};
 
@@ -94,7 +94,10 @@ fn replay_connection() {
 
     // Should have sent 'G' (config request) command.
     let all_writes: Vec<Vec<u8>> = devices.iter().flat_map(|d| d.get_actual_writes()).collect();
-    assert!(has_command(&all_writes, b'G'), "Expected 'G' command in writes");
+    assert!(
+        has_command(&all_writes, b'G'),
+        "Expected 'G' command in writes"
+    );
 }
 
 #[test]
@@ -105,7 +108,10 @@ fn replay_force_recalibration() {
     }
 
     let (mgr, devices, _events) = make_replay_manager("force_recalibration");
-    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
+    let connected = wait_for(
+        || mgr.get_info(0).connected || mgr.get_info(1).connected,
+        2000,
+    );
     assert!(connected);
 
     for i in 0..2 {
@@ -116,7 +122,10 @@ fn replay_force_recalibration() {
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let all_writes: Vec<Vec<u8>> = devices.iter().flat_map(|d| d.get_actual_writes()).collect();
-    assert!(has_command_str(&all_writes, b"C\n"), "Expected 'C\\n' command");
+    assert!(
+        has_command_str(&all_writes, b"C\n"),
+        "Expected 'C\\n' command"
+    );
 }
 
 #[test]
@@ -134,7 +143,10 @@ fn replay_reenable_auto_lights() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = devices[0].get_actual_writes();
-    assert!(has_command_str(&writes, b"S 1\n"), "Expected 'S 1\\n' command");
+    assert!(
+        has_command_str(&writes, b"S 1\n"),
+        "Expected 'S 1\\n' command"
+    );
 }
 
 #[test]
@@ -164,7 +176,10 @@ fn replay_factory_reset() {
     }
 
     let (mgr, devices, _events) = make_replay_manager("factory_reset");
-    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
+    let connected = wait_for(
+        || mgr.get_info(0).connected || mgr.get_info(1).connected,
+        2000,
+    );
     assert!(connected);
 
     let pad = if mgr.get_info(0).connected { 0 } else { 1 };
@@ -172,8 +187,14 @@ fn replay_factory_reset() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let all_writes: Vec<Vec<u8>> = devices.iter().flat_map(|d| d.get_actual_writes()).collect();
-    assert!(has_command_str(&all_writes, b"f\n"), "Expected 'f\\n' command");
-    assert!(has_command(&all_writes, b'G'), "Expected 'G' command after reset");
+    assert!(
+        has_command_str(&all_writes, b"f\n"),
+        "Expected 'f\\n' command"
+    );
+    assert!(
+        has_command(&all_writes, b'G'),
+        "Expected 'G' command after reset"
+    );
 }
 
 #[test]
@@ -184,7 +205,10 @@ fn replay_sensor_test_mode() {
     }
 
     let (mgr, devices, _events) = make_replay_manager("sensor_test_mode");
-    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
+    let connected = wait_for(
+        || mgr.get_info(0).connected || mgr.get_info(1).connected,
+        2000,
+    );
     assert!(connected);
 
     for i in 0..2 {
@@ -254,7 +278,10 @@ fn replay_panel_lights() {
 
     let writes = devices[0].get_actual_writes();
     let lights_count = count_command(&writes, b'2') + count_command(&writes, b'3');
-    assert!(lights_count >= 2, "Expected lights commands ('2' and '3'), got {lights_count}");
+    assert!(
+        lights_count >= 2,
+        "Expected lights commands ('2' and '3'), got {lights_count}"
+    );
 
     // Verify color scaling: no byte in lights payload should exceed 170.
     for w in &writes {
@@ -276,7 +303,10 @@ fn replay_panel_animation() {
     }
 
     let (mgr, devices, _events) = make_replay_manager("panel_animation");
-    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
+    let connected = wait_for(
+        || mgr.get_info(0).connected || mgr.get_info(1).connected,
+        2000,
+    );
     assert!(connected);
 
     // Send lights frames (simulating animation playback).
@@ -291,8 +321,14 @@ fn replay_panel_animation() {
 
     let all_writes: Vec<Vec<u8>> = devices.iter().flat_map(|d| d.get_actual_writes()).collect();
     let lights_count = count_command(&all_writes, b'2') + count_command(&all_writes, b'3');
-    assert!(lights_count >= 30, "Expected >= 30 lights commands, got {lights_count}");
-    assert!(has_command_str(&all_writes, b"S 1\n"), "Expected 'S 1\\n' at end");
+    assert!(
+        lights_count >= 30,
+        "Expected >= 30 lights commands, got {lights_count}"
+    );
+    assert!(
+        has_command_str(&all_writes, b"S 1\n"),
+        "Expected 'S 1\\n' at end"
+    );
 }
 
 #[test]
@@ -303,7 +339,10 @@ fn replay_animation_upload() {
     }
 
     let (mgr, devices, _events) = make_replay_manager("animation_upload");
-    let connected = wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 2000);
+    let connected = wait_for(
+        || mgr.get_info(0).connected || mgr.get_info(1).connected,
+        2000,
+    );
     assert!(connected);
 
     let pad = if mgr.get_info(0).connected { 0 } else { 1 };

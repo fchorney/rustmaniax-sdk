@@ -112,7 +112,8 @@ impl SmxDevice {
     }
 
     pub fn set_pad_index(&self, index: usize) {
-        self.pad_index.store(index, std::sync::atomic::Ordering::Relaxed);
+        self.pad_index
+            .store(index, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Returns the shared pad index (for use in input callbacks).
@@ -173,7 +174,11 @@ impl SmxDevice {
         if !self.is_connected() {
             return None;
         }
-        Some(if self.send_config { self.wanted_config } else { self.config })
+        Some(if self.send_config {
+            self.wanted_config
+        } else {
+            self.config
+        })
     }
 
     pub fn set_config(&mut self, config: SmxConfig) {
@@ -223,7 +228,9 @@ impl SmxDevice {
     }
 
     pub fn factory_reset(&mut self) {
-        let Some(conn) = &mut self.connection else { return };
+        let Some(conn) = &mut self.connection else {
+            return;
+        };
         if !conn.is_connected_with_info() {
             return;
         }
@@ -233,7 +240,9 @@ impl SmxDevice {
     }
 
     pub fn force_recalibration(&mut self) {
-        let Some(conn) = &mut self.connection else { return };
+        let Some(conn) = &mut self.connection else {
+            return;
+        };
         conn.send_command(b"C\n", None);
     }
 
@@ -277,8 +286,12 @@ impl SmxDevice {
                     pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed),
                     info: self.get_info(),
                 },
-                UpdateReason::Disconnected => SmxEvent::Disconnected { pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed) },
-                UpdateReason::ConfigUpdated => SmxEvent::ConfigUpdated { pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed) },
+                UpdateReason::Disconnected => SmxEvent::Disconnected {
+                    pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed),
+                },
+                UpdateReason::ConfigUpdated => SmxEvent::ConfigUpdated {
+                    pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed),
+                },
                 UpdateReason::SensorTestData => SmxEvent::SensorTestData {
                     pad: self.pad_index.load(std::sync::atomic::Ordering::Relaxed),
                     data: self.sensor_test_data.clone(),
@@ -464,7 +477,12 @@ impl SmxDevice {
             data.push(value);
         }
 
-        let fw = self.connection.as_ref().unwrap().device_info().firmware_version;
+        let fw = self
+            .connection
+            .as_ref()
+            .unwrap()
+            .device_info()
+            .firmware_version;
         self.sensor_test_data = parse_sensor_test_data(&data, fw);
         self.have_sensor_test_data = true;
         self.call_update(UpdateReason::SensorTestData);
@@ -522,8 +540,7 @@ fn parse_sensor_test_data(data: &[u16], firmware_version: u16) -> SensorTestData
         // Parse sensor values (i16 little-endian, bytes 1-8).
         for s in 0..4 {
             let offset = 1 + s * 2;
-            output.sensor_level[panel][s] =
-                i16::from_le_bytes([raw[offset], raw[offset + 1]]);
+            output.sensor_level[panel][s] = i16::from_le_bytes([raw[offset], raw[offset + 1]]);
         }
 
         // DIP switch and bad jumper flags (byte 9).
@@ -548,20 +565,28 @@ fn parse_sensor_test_data(data: &[u16], firmware_version: u16) -> SensorTestData
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct OldSmxConfig {
-    unused1: u8, unused2: u8,
-    unused3: u8, unused4: u8,
-    unused5: u8, unused6: u8,
+    unused1: u8,
+    unused2: u8,
+    unused3: u8,
+    unused4: u8,
+    unused5: u8,
+    unused6: u8,
     master_debounce_ms: u16,
-    panel_threshold_7_low: u8, panel_threshold_7_high: u8,
-    panel_threshold_4_low: u8, panel_threshold_4_high: u8,
-    panel_threshold_2_low: u8, panel_threshold_2_high: u8,
+    panel_threshold_7_low: u8,
+    panel_threshold_7_high: u8,
+    panel_threshold_4_low: u8,
+    panel_threshold_4_high: u8,
+    panel_threshold_2_low: u8,
+    panel_threshold_2_high: u8,
     panel_debounce_us: u16,
     auto_calibration_period_ms: u16,
     auto_calibration_max_deviation: u8,
     bad_sensor_minimum_delay_seconds: u8,
     auto_calibration_averages_per_update: u16,
-    unused7: u8, unused8: u8,
-    panel_threshold_1_low: u8, panel_threshold_1_high: u8,
+    unused7: u8,
+    unused8: u8,
+    panel_threshold_1_low: u8,
+    panel_threshold_1_high: u8,
     enabled_sensors: [u8; 5],
     auto_lights_timeout: u8,
     step_color: [u8; 27],
@@ -570,11 +595,16 @@ struct OldSmxConfig {
     master_version: u8,
     config_version: u8,
     unused9: [u8; 10],
-    panel_threshold_0_low: u8, panel_threshold_0_high: u8,
-    panel_threshold_3_low: u8, panel_threshold_3_high: u8,
-    panel_threshold_5_low: u8, panel_threshold_5_high: u8,
-    panel_threshold_6_low: u8, panel_threshold_6_high: u8,
-    panel_threshold_8_low: u8, panel_threshold_8_high: u8,
+    panel_threshold_0_low: u8,
+    panel_threshold_0_high: u8,
+    panel_threshold_3_low: u8,
+    panel_threshold_3_high: u8,
+    panel_threshold_5_low: u8,
+    panel_threshold_5_high: u8,
+    panel_threshold_6_low: u8,
+    panel_threshold_6_high: u8,
+    panel_threshold_8_low: u8,
+    panel_threshold_8_high: u8,
     debounce_delay_ms: u16,
     padding: [u8; 164],
 }
@@ -658,40 +688,106 @@ fn convert_to_old_config(new_config: &SmxConfig, old_data: &mut Vec<u8>) {
 
         write_field!(master_debounce_ms, new_config.debounce_nodelay_ms);
 
-        write_field!(panel_threshold_7_low, new_config.panel_settings[7].load_cell_low_threshold);
-        write_field!(panel_threshold_7_high, new_config.panel_settings[7].load_cell_high_threshold);
-        write_field!(panel_threshold_4_low, new_config.panel_settings[4].load_cell_low_threshold);
-        write_field!(panel_threshold_4_high, new_config.panel_settings[4].load_cell_high_threshold);
-        write_field!(panel_threshold_2_low, new_config.panel_settings[2].load_cell_low_threshold);
-        write_field!(panel_threshold_2_high, new_config.panel_settings[2].load_cell_high_threshold);
+        write_field!(
+            panel_threshold_7_low,
+            new_config.panel_settings[7].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_7_high,
+            new_config.panel_settings[7].load_cell_high_threshold
+        );
+        write_field!(
+            panel_threshold_4_low,
+            new_config.panel_settings[4].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_4_high,
+            new_config.panel_settings[4].load_cell_high_threshold
+        );
+        write_field!(
+            panel_threshold_2_low,
+            new_config.panel_settings[2].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_2_high,
+            new_config.panel_settings[2].load_cell_high_threshold
+        );
 
         write_field!(panel_debounce_us, new_config.panel_debounce_us);
-        write_field!(auto_calibration_max_deviation, new_config.auto_calibration_max_deviation);
-        write_field!(bad_sensor_minimum_delay_seconds, new_config.bad_sensor_minimum_delay_seconds);
-        write_field!(auto_calibration_averages_per_update, new_config.auto_calibration_averages_per_update);
+        write_field!(
+            auto_calibration_max_deviation,
+            new_config.auto_calibration_max_deviation
+        );
+        write_field!(
+            bad_sensor_minimum_delay_seconds,
+            new_config.bad_sensor_minimum_delay_seconds
+        );
+        write_field!(
+            auto_calibration_averages_per_update,
+            new_config.auto_calibration_averages_per_update
+        );
 
-        write_field!(panel_threshold_1_low, new_config.panel_settings[1].load_cell_low_threshold);
-        write_field!(panel_threshold_1_high, new_config.panel_settings[1].load_cell_high_threshold);
+        write_field!(
+            panel_threshold_1_low,
+            new_config.panel_settings[1].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_1_high,
+            new_config.panel_settings[1].load_cell_high_threshold
+        );
 
         write_field!(enabled_sensors, new_config.enabled_sensors);
         write_field!(auto_lights_timeout, new_config.auto_lights_timeout);
         write_field!(step_color, new_config.step_color);
         write_field!(panel_rotation, new_config.panel_rotation);
-        write_field!(auto_calibration_samples_per_average, new_config.auto_calibration_samples_per_average);
+        write_field!(
+            auto_calibration_samples_per_average,
+            new_config.auto_calibration_samples_per_average
+        );
 
         write_field!(master_version, new_config.master_version);
         write_field!(config_version, new_config.config_version);
 
-        write_field!(panel_threshold_0_low, new_config.panel_settings[0].load_cell_low_threshold);
-        write_field!(panel_threshold_0_high, new_config.panel_settings[0].load_cell_high_threshold);
-        write_field!(panel_threshold_3_low, new_config.panel_settings[3].load_cell_low_threshold);
-        write_field!(panel_threshold_3_high, new_config.panel_settings[3].load_cell_high_threshold);
-        write_field!(panel_threshold_5_low, new_config.panel_settings[5].load_cell_low_threshold);
-        write_field!(panel_threshold_5_high, new_config.panel_settings[5].load_cell_high_threshold);
-        write_field!(panel_threshold_6_low, new_config.panel_settings[6].load_cell_low_threshold);
-        write_field!(panel_threshold_6_high, new_config.panel_settings[6].load_cell_high_threshold);
-        write_field!(panel_threshold_8_low, new_config.panel_settings[8].load_cell_low_threshold);
-        write_field!(panel_threshold_8_high, new_config.panel_settings[8].load_cell_high_threshold);
+        write_field!(
+            panel_threshold_0_low,
+            new_config.panel_settings[0].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_0_high,
+            new_config.panel_settings[0].load_cell_high_threshold
+        );
+        write_field!(
+            panel_threshold_3_low,
+            new_config.panel_settings[3].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_3_high,
+            new_config.panel_settings[3].load_cell_high_threshold
+        );
+        write_field!(
+            panel_threshold_5_low,
+            new_config.panel_settings[5].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_5_high,
+            new_config.panel_settings[5].load_cell_high_threshold
+        );
+        write_field!(
+            panel_threshold_6_low,
+            new_config.panel_settings[6].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_6_high,
+            new_config.panel_settings[6].load_cell_high_threshold
+        );
+        write_field!(
+            panel_threshold_8_low,
+            new_config.panel_settings[8].load_cell_low_threshold
+        );
+        write_field!(
+            panel_threshold_8_high,
+            new_config.panel_settings[8].load_cell_high_threshold
+        );
 
         write_field!(debounce_delay_ms, new_config.debounce_delay_ms);
     }
@@ -842,7 +938,10 @@ mod tests {
         let old_ptr = old.as_mut_ptr().cast::<OldSmxConfig>();
         unsafe { std::ptr::addr_of_mut!((*old_ptr).config_version).write_unaligned(1) };
         unsafe { std::ptr::addr_of_mut!((*old_ptr).master_version).write_unaligned(1) };
-        unsafe { std::ptr::addr_of_mut!((*old_ptr).enabled_sensors).write_unaligned([0x1F, 0x0A, 0x00, 0xFF, 0x55]) };
+        unsafe {
+            std::ptr::addr_of_mut!((*old_ptr).enabled_sensors)
+                .write_unaligned([0x1F, 0x0A, 0x00, 0xFF, 0x55])
+        };
         unsafe { std::ptr::addr_of_mut!((*old_ptr).step_color[0]).write_unaligned(100) };
         unsafe { std::ptr::addr_of_mut!((*old_ptr).step_color[26]).write_unaligned(200) };
 
@@ -884,7 +983,8 @@ mod tests {
             Box::new(fake),
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut device = SmxDevice::new(0);
         device.set_connection(cmd);
@@ -896,7 +996,9 @@ mod tests {
             // device's write-triggered response is queued before the poll.
             std::thread::sleep(std::time::Duration::from_millis(1));
             poll.poll(0);
-            if device.is_connected() { break; }
+            if device.is_connected() {
+                break;
+            }
         }
         assert!(device.is_connected());
 
@@ -961,4 +1063,3 @@ mod integration_tests {
         assert!(!info.is_player2);
     }
 }
-

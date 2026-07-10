@@ -5,9 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::connection::{HidDevice, HidDeviceInfo, HidEnumerator};
 use crate::error::SmxError;
-use crate::protocol::{
-    HID_REPORT_INPUT_STATE, PACKET_FLAG_DEVICE_INFO, SERIAL_SIZE,
-};
+use crate::protocol::{HID_REPORT_INPUT_STATE, PACKET_FLAG_DEVICE_INFO, SERIAL_SIZE};
 
 // Re-exported for integration/replay tests that inspect raw HID writes.
 pub use crate::protocol::HID_REPORT_COMMAND;
@@ -64,11 +62,15 @@ impl FakeDevice {
     pub fn new_auto(is_p2: bool, firmware: u16) -> Self {
         let dev = Self::new();
         let serial: [u8; SERIAL_SIZE] = if is_p2 {
-            [0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7,
-             0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF]
+            [
+                0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD,
+                0xBE, 0xBF,
+            ]
         } else {
-            [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
-             0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF]
+            [
+                0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD,
+                0xAE, 0xAF,
+            ]
         };
         let info_pkt = make_device_info_packet(is_p2, firmware, &serial);
         let config_pkts = make_config_response_packets(firmware);
@@ -121,7 +123,12 @@ impl FakeDevice {
     }
 
     /// Queue a device info response.
-    pub fn queue_device_info_response(&self, is_p2: bool, firmware: u16, serial: &[u8; SERIAL_SIZE]) {
+    pub fn queue_device_info_response(
+        &self,
+        is_p2: bool,
+        firmware: u16,
+        serial: &[u8; SERIAL_SIZE],
+    ) {
         let pkt = make_device_info_packet(is_p2, firmware, serial);
         // Wrap in Report 6 format.
         let payload_len = pkt.len();
@@ -146,7 +153,9 @@ impl FakeDevice {
     /// Queue a complete single-packet command response (START|END|HOST_CMD_FINISHED).
     pub fn queue_command_response(&self, payload: &[u8]) {
         self.queue_report6(
-            PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED,
+            PACKET_FLAG_START_OF_COMMAND
+                | PACKET_FLAG_END_OF_COMMAND
+                | PACKET_FLAG_HOST_CMD_FINISHED,
             payload,
         );
     }
@@ -298,7 +307,8 @@ fn make_config_response_packets(firmware: u16) -> Vec<Vec<u8>> {
     // Single packet that fits within HID_MAX_PAYLOAD_SIZE (61 bytes).
     let mut pkt = vec![0u8; 3 + payload.len()];
     pkt[0] = HID_REPORT_DATA;
-    pkt[1] = PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED;
+    pkt[1] =
+        PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED;
     pkt[2] = payload.len() as u8;
     pkt[3..].copy_from_slice(&payload);
     vec![pkt]

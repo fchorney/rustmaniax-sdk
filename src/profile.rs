@@ -127,7 +127,9 @@ pub fn maybe_report() {
             continue;
         }
         any = true;
-        line.push_str(&format!(" {name}[avg={avg_us:.1}us max={max_us:.1}us n={n}]"));
+        line.push_str(&format!(
+            " {name}[avg={avg_us:.1}us max={max_us:.1}us n={n}]"
+        ));
     }
     if any {
         log::warn!("{line}");

@@ -160,13 +160,20 @@ fn run_phase(
     }
     let elapsed = start.elapsed().as_secs_f64();
     if lights {
-        println!("  (streamed {} light frames = {:.1}/s requested)", frames_sent, frames_sent as f64 / elapsed);
+        println!(
+            "  (streamed {} light frames = {:.1}/s requested)",
+            frames_sent,
+            frames_sent as f64 / elapsed
+        );
     }
     for pad in 0..2 {
         if !active[pad] {
             continue;
         }
         let count = SAMPLES[pad].load(Ordering::Relaxed);
-        println!("  pad {pad} -> {count} samples in {elapsed:.2}s = {:.1}/s", count as f64 / elapsed);
+        println!(
+            "  pad {pad} -> {count} samples in {elapsed:.2}s = {:.1}/s",
+            count as f64 / elapsed
+        );
     }
 }

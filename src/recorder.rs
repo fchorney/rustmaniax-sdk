@@ -97,11 +97,7 @@ pub struct RecordingEnumerator {
 impl RecordingEnumerator {
     /// Create a recording enumerator that writes captures to `output_dir`.
     /// If `timestamp_subdir` is true, creates a timestamped subdirectory.
-    pub fn new(
-        inner: Box<dyn HidEnumerator>,
-        output_dir: &Path,
-        timestamp_subdir: bool,
-    ) -> Self {
+    pub fn new(inner: Box<dyn HidEnumerator>, output_dir: &Path, timestamp_subdir: bool) -> Self {
         let dir = if timestamp_subdir {
             let ts = chrono_timestamp();
             output_dir.join(ts)
@@ -125,7 +121,9 @@ impl RecordingEnumerator {
         if let Some((_, sink)) = sinks.iter().find(|(p, _)| p == path) {
             return Some(Arc::clone(sink));
         }
-        let file_path = self.output_dir.join(format!("device_{}.smxhid", sinks.len()));
+        let file_path = self
+            .output_dir
+            .join(format!("device_{}.smxhid", sinks.len()));
         match RecordingSink::create(&file_path) {
             Ok(sink) => {
                 let sink = Arc::new(sink);

@@ -17,8 +17,8 @@
 //!   SMX_CAPTURE_DIR=capture/factory_reset cargo test --test hardware hardware_zzz_factory_reset -- --ignored
 
 use rustmaniax_sdk::{
-    HidapiEnumerator, HidEnumerator, PanelTestMode, RecordingEnumerator, SensorTestMode,
-    SmxEvent, SmxManager,
+    HidEnumerator, HidapiEnumerator, PanelTestMode, RecordingEnumerator, SensorTestMode, SmxEvent,
+    SmxManager,
 };
 
 use std::path::Path;
@@ -46,12 +46,11 @@ fn get_manager() -> &'static (SmxManager, Arc<Mutex<Vec<SmxEvent>>>) {
 
         let enumerator: Box<dyn HidEnumerator> = {
             let real = Box::new(HidapiEnumerator::new().expect("Failed to init HID"));
-            match std::env::var("SMX_CAPTURE_DIR").ok().filter(|s| !s.is_empty()) {
-                Some(dir) => Box::new(RecordingEnumerator::new(
-                    real,
-                    Path::new(&dir),
-                    false,
-                )),
+            match std::env::var("SMX_CAPTURE_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
+                Some(dir) => Box::new(RecordingEnumerator::new(real, Path::new(&dir), false)),
                 None => real,
             }
         };
@@ -67,7 +66,10 @@ fn get_manager() -> &'static (SmxManager, Arc<Mutex<Vec<SmxEvent>>>) {
 /// Returns indices of all connected pads.
 fn connected_pads() -> Vec<usize> {
     let (mgr, _) = get_manager();
-    wait_for(|| mgr.get_info(0).connected || mgr.get_info(1).connected, 5000);
+    wait_for(
+        || mgr.get_info(0).connected || mgr.get_info(1).connected,
+        5000,
+    );
     (0..2).filter(|&i| mgr.get_info(i).connected).collect()
 }
 
@@ -78,8 +80,10 @@ fn connected_pads() -> Vec<usize> {
 fn hardware_connection() {
     let (mgr, _events) = get_manager();
     let pads = connected_pads();
-    assert!(!pads.is_empty(), "No SMX device detected. Is a pad connected?");
-
+    assert!(
+        !pads.is_empty(),
+        "No SMX device detected. Is a pad connected?"
+    );
 
     for i in &pads {
         let info = mgr.get_info(*i);
@@ -105,7 +109,10 @@ fn hardware_force_recalibration() {
     std::thread::sleep(Duration::from_millis(500));
 
     for &pad in &pads {
-        assert!(mgr.get_info(pad).connected, "Pad {pad} disconnected after recalibration");
+        assert!(
+            mgr.get_info(pad).connected,
+            "Pad {pad} disconnected after recalibration"
+        );
     }
 }
 
@@ -154,7 +161,8 @@ fn hardware_config_get_set() {
 
     for &pad in &pads {
         let original = mgr.get_config(pad).expect("Config not available");
-        let orig_debounce = unsafe { std::ptr::addr_of!(original.panel_debounce_us).read_unaligned() };
+        let orig_debounce =
+            unsafe { std::ptr::addr_of!(original.panel_debounce_us).read_unaligned() };
         println!("Pad {pad} original panelDebounceMicroseconds: {orig_debounce}");
 
         let mut modified = original;
@@ -164,7 +172,8 @@ fn hardware_config_get_set() {
         std::thread::sleep(Duration::from_secs(2));
 
         let readback = mgr.get_config(pad).unwrap();
-        let rb_debounce = unsafe { std::ptr::addr_of!(readback.panel_debounce_us).read_unaligned() };
+        let rb_debounce =
+            unsafe { std::ptr::addr_of!(readback.panel_debounce_us).read_unaligned() };
         println!("Pad {pad} read back: {rb_debounce}");
         assert_eq!(rb_debounce, new_val);
 
@@ -173,7 +182,8 @@ fn hardware_config_get_set() {
         std::thread::sleep(Duration::from_secs(2));
 
         let restored = mgr.get_config(pad).unwrap();
-        let res_debounce = unsafe { std::ptr::addr_of!(restored.panel_debounce_us).read_unaligned() };
+        let res_debounce =
+            unsafe { std::ptr::addr_of!(restored.panel_debounce_us).read_unaligned() };
         assert_eq!(res_debounce, orig_debounce);
         println!("Pad {pad} restored: {res_debounce}");
     }
@@ -194,14 +204,18 @@ fn hardware_platform_lights() {
 
     // Red.
     let mut data = vec![0u8; 264];
-    for i in 0..88 { data[i * 3] = 255; }
+    for i in 0..88 {
+        data[i * 3] = 255;
+    }
     mgr.set_platform_lights(&data);
     println!("Set platform lights to RED");
     std::thread::sleep(Duration::from_secs(2));
 
     // Blue.
     data.fill(0);
-    for i in 0..88 { data[i * 3 + 2] = 255; }
+    for i in 0..88 {
+        data[i * 3 + 2] = 255;
+    }
     mgr.set_platform_lights(&data);
     println!("Set platform lights to BLUE");
     std::thread::sleep(Duration::from_secs(2));
@@ -263,7 +277,8 @@ fn hardware_panel_lights() {
 
         for pad in 0..2 {
             for panel in 0..9 {
-                let base_hue = (progress * 360.0 + panel as f32 * 40.0 + pad as f32 * 180.0) % 360.0;
+                let base_hue =
+                    (progress * 360.0 + panel as f32 * 40.0 + pad as f32 * 180.0) % 360.0;
                 for led in 0..25 {
                     let hue = (base_hue + led as f32 * 2.0) % 360.0;
                     let (r, g, b) = hsv_to_rgb(hue);
@@ -308,7 +323,10 @@ fn hardware_panel_animation() {
     std::thread::sleep(Duration::from_secs(3));
 
     for &pad in &pads {
-        assert!(mgr.get_info(pad).connected, "Pad {pad} disconnected during animation");
+        assert!(
+            mgr.get_info(pad).connected,
+            "Pad {pad} disconnected during animation"
+        );
     }
 
     mgr.set_animation_auto(false);
@@ -329,13 +347,17 @@ fn hardware_animation_upload() {
     for &pad in &pads {
         let info = mgr.get_info(pad);
         if info.firmware_version < 4 {
-            println!("Pad {pad}: firmware v4+ required for upload, skipping (fw={})", info.firmware_version);
+            println!(
+                "Pad {pad}: firmware v4+ required for upload, skipping (fw={})",
+                info.firmware_version
+            );
             continue;
         }
 
         let gif = generate_test_animation_gif();
-        let upload = rustmaniax_sdk::prepare_upload(&gif, pad, rustmaniax_sdk::LightsType::Released)
-            .expect("Failed to prepare upload");
+        let upload =
+            rustmaniax_sdk::prepare_upload(&gif, pad, rustmaniax_sdk::LightsType::Released)
+                .expect("Failed to prepare upload");
 
         let total = upload.commands.len();
         println!("Pad {pad}: sending {} upload commands", total);
@@ -367,13 +389,19 @@ fn hardware_input_state_report_rate() {
     // Fire on every Report 3 so we measure the raw arrival rate.
     mgr.set_input_state_mode(true);
 
-    let count_before = events.lock().unwrap().iter()
+    let count_before = events
+        .lock()
+        .unwrap()
+        .iter()
         .filter(|e| matches!(e, SmxEvent::InputState { .. }))
         .count();
 
     std::thread::sleep(Duration::from_secs(1));
 
-    let count_after = events.lock().unwrap().iter()
+    let count_after = events
+        .lock()
+        .unwrap()
+        .iter()
         .filter(|e| matches!(e, SmxEvent::InputState { .. }))
         .count();
 
@@ -401,8 +429,14 @@ fn hardware_zzz_factory_reset() {
     std::thread::sleep(Duration::from_secs(2));
 
     for &pad in &pads {
-        assert!(mgr.get_info(pad).connected, "Pad {pad} disconnected after factory reset");
-        assert!(mgr.get_config(pad).is_some(), "Pad {pad} config not available after factory reset");
+        assert!(
+            mgr.get_info(pad).connected,
+            "Pad {pad} disconnected after factory reset"
+        );
+        assert!(
+            mgr.get_config(pad).is_some(),
+            "Pad {pad} config not available after factory reset"
+        );
     }
     println!("All pads reset and still connected");
 }

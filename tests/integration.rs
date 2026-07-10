@@ -1,8 +1,8 @@
 //! Full-stack integration tests exercising SmxManager with fake HID devices.
 
-use rustmaniax_sdk::{PanelTestMode, SmxEvent, SmxManager};
 use rustmaniax_sdk::test_helpers::HID_REPORT_COMMAND;
-use rustmaniax_sdk::test_helpers::{wait_for, FakeDevice, FakeEnumerator};
+use rustmaniax_sdk::test_helpers::{FakeDevice, FakeEnumerator, wait_for};
+use rustmaniax_sdk::{PanelTestMode, SmxEvent, SmxManager};
 
 use std::sync::{Arc, Mutex};
 
@@ -22,8 +22,12 @@ fn make_manager_one_device(
     (mgr, dev, events)
 }
 
-fn make_manager_two_devices(
-) -> (SmxManager, FakeDevice, FakeDevice, Arc<Mutex<Vec<SmxEvent>>>) {
+fn make_manager_two_devices() -> (
+    SmxManager,
+    FakeDevice,
+    FakeDevice,
+    Arc<Mutex<Vec<SmxEvent>>>,
+) {
     let dev_p1 = FakeDevice::new_auto(false, 5);
     let dev_p2 = FakeDevice::new_auto(true, 5);
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -55,7 +59,10 @@ fn single_p1_device_discovered_and_connected() {
 
     // Should have received a Connected callback for pad 0.
     let evts = events.lock().unwrap();
-    assert!(evts.iter().any(|e| matches!(e, SmxEvent::Connected { pad: 0, .. })));
+    assert!(
+        evts.iter()
+            .any(|e| matches!(e, SmxEvent::Connected { pad: 0, .. }))
+    );
 }
 
 #[test]
@@ -103,8 +110,16 @@ fn set_player_assignment_overrides_jumper_order() {
     // Pin the assignment reversed (the P2-jumpered pad becomes P1, slot 0).
     // The override must beat the jumper, so the slots swap immediately.
     mgr.set_player_assignment(Some(s1.clone()), Some(s0.clone()));
-    assert_eq!(mgr.get_info(0).serial, s1, "P2-jumpered pad should now be slot 0");
-    assert_eq!(mgr.get_info(1).serial, s0, "P1-jumpered pad should now be slot 1");
+    assert_eq!(
+        mgr.get_info(0).serial,
+        s1,
+        "P2-jumpered pad should now be slot 0"
+    );
+    assert_eq!(
+        mgr.get_info(1).serial,
+        s0,
+        "P1-jumpered pad should now be slot 1"
+    );
 
     // Re-applying the same assignment is idempotent (no further swap).
     mgr.set_player_assignment(Some(s1.clone()), Some(s0.clone()));
@@ -113,7 +128,11 @@ fn set_player_assignment_overrides_jumper_order() {
 
     // Clearing the override restores jumper ordering.
     mgr.set_player_assignment(None, None);
-    assert_eq!(mgr.get_info(0).serial, s0, "jumper order restored after clear");
+    assert_eq!(
+        mgr.get_info(0).serial,
+        s0,
+        "jumper order restored after clear"
+    );
     assert_eq!(mgr.get_info(1).serial, s1);
 }
 
@@ -152,8 +171,12 @@ fn factory_reset_sends_f_and_g_commands() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = dev.get_writes();
-    let has_f = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'f');
-    let has_g = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'G');
+    let has_f = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'f');
+    let has_g = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'G');
     assert!(has_f, "Expected 'f' command");
     assert!(has_g, "Expected 'G' command");
 }
@@ -169,7 +192,9 @@ fn force_recalibration_sends_c_command() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = dev.get_writes();
-    let has_c = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'C');
+    let has_c = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'C');
     assert!(has_c, "Expected 'C' command");
 }
 
@@ -201,9 +226,9 @@ fn panel_test_mode_sends_t_command() {
 
     let has_t = wait_for(
         || {
-            dev.get_writes().iter().any(|w| {
-                w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'1'
-            })
+            dev.get_writes()
+                .iter()
+                .any(|w| w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'1')
         },
         2000,
     );
@@ -221,9 +246,9 @@ fn set_serial_numbers_sends_s_command() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = dev.get_writes();
-    let has_s = writes.iter().any(|w| {
-        w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b's' && w[2] >= 18
-    });
+    let has_s = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b's' && w[2] >= 18);
     assert!(has_s, "Expected 's' command with serial data");
 }
 
@@ -287,7 +312,10 @@ fn config_available_after_connection() {
     assert!(connected);
 
     let config = mgr.get_config(0);
-    assert!(config.is_some(), "Config should be available after connection");
+    assert!(
+        config.is_some(),
+        "Config should be available after connection"
+    );
 }
 
 #[test]
@@ -307,7 +335,13 @@ fn device_disconnect_fires_callback_and_clears_slot() {
     // Simulate read error (device unplugged).
     dev.set_fail_reads(true);
     let disconnected = wait_for(
-        || events.lock().unwrap().iter().any(|e| matches!(e, SmxEvent::Disconnected { .. })),
+        || {
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, SmxEvent::Disconnected { .. }))
+        },
         2000,
     );
     assert!(disconnected, "Disconnect event not received");
@@ -333,10 +367,16 @@ fn device_reconnects_after_disconnect() {
     assert!(reconnected, "Device did not reconnect");
 
     // Should have received at least 2 Connected events.
-    let connect_count = events.lock().unwrap().iter()
+    let connect_count = events
+        .lock()
+        .unwrap()
+        .iter()
         .filter(|e| matches!(e, SmxEvent::Connected { .. }))
         .count();
-    assert!(connect_count >= 2, "Expected >= 2 Connected events, got {connect_count}");
+    assert!(
+        connect_count >= 2,
+        "Expected >= 2 Connected events, got {connect_count}"
+    );
 }
 
 // ─── Config Write ────────────────────────────────────────────────────────────
@@ -355,7 +395,9 @@ fn set_config_sends_w_command_fw5() {
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let writes = dev.get_writes();
-    let has_w = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'W');
+    let has_w = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'W');
     assert!(has_w, "Expected 'W' command for fw>=5");
 }
 
@@ -371,7 +413,9 @@ fn set_config_sends_w_command_fw4() {
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let writes = dev.get_writes();
-    let has_w = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'w');
+    let has_w = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'w');
     assert!(has_w, "Expected 'w' command for fw<5");
 }
 
@@ -390,11 +434,15 @@ fn set_config_rate_limits() {
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let writes = dev.get_writes();
-    let w_count = writes.iter()
+    let w_count = writes
+        .iter()
         .filter(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'W')
         .count();
     // Should only have sent one 'W' due to rate limiting.
-    assert_eq!(w_count, 1, "Expected 1 'W' command (rate limited), got {w_count}");
+    assert_eq!(
+        w_count, 1,
+        "Expected 1 'W' command (rate limited), got {w_count}"
+    );
 }
 
 // ─── Lights Behavior ─────────────────────────────────────────────────────────
@@ -410,10 +458,18 @@ fn set_lights_rejects_invalid_size() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = dev.get_writes();
-    let lights_cmds = writes.iter()
-        .filter(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && (w[3] == b'2' || w[3] == b'3' || w[3] == b'4'))
+    let lights_cmds = writes
+        .iter()
+        .filter(|w| {
+            w.len() > 3
+                && w[0] == HID_REPORT_COMMAND
+                && (w[3] == b'2' || w[3] == b'3' || w[3] == b'4')
+        })
         .count();
-    assert_eq!(lights_cmds, 0, "No lights commands should be sent for invalid size");
+    assert_eq!(
+        lights_cmds, 0,
+        "No lights commands should be sent for invalid size"
+    );
 }
 
 #[test]
@@ -430,10 +486,14 @@ fn set_lights_blocked_during_panel_test_mode() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = dev.get_writes();
-    let lights_cmds = writes.iter()
+    let lights_cmds = writes
+        .iter()
         .filter(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && (w[3] == b'2' || w[3] == b'3'))
         .count();
-    assert_eq!(lights_cmds, 0, "Lights should be blocked during panel test mode");
+    assert_eq!(
+        lights_cmds, 0,
+        "Lights should be blocked during panel test mode"
+    );
 
     mgr.set_panel_test_mode(PanelTestMode::Off);
 }
@@ -449,7 +509,9 @@ fn set_lights_fw4_sends_4_command() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = dev.get_writes();
-    let has_4 = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'4');
+    let has_4 = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'4');
     assert!(has_4, "Expected '4' command for fw>=4 (25-LED inner grid)");
 }
 
@@ -464,11 +526,17 @@ fn set_lights_fw3_no_4_command() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = dev.get_writes();
-    let has_4 = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'4');
+    let has_4 = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'4');
     assert!(!has_4, "Should NOT send '4' command for fw<4");
 
-    let has_2 = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'2');
-    let has_3 = writes.iter().any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'3');
+    let has_2 = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'2');
+    let has_3 = writes
+        .iter()
+        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'3');
     assert!(has_2 && has_3, "Should still send '2' and '3' commands");
 }
 
@@ -488,9 +556,9 @@ fn panel_test_mode_off_sends_t_0() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let writes = dev.get_writes();
-    let has_t0 = writes.iter().any(|w| {
-        w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'0'
-    });
+    let has_t0 = writes
+        .iter()
+        .any(|w| w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'0');
     assert!(has_t0, "Expected 't 0' command when disabling test mode");
 }
 
@@ -510,8 +578,14 @@ fn duplicate_player_jumpers_both_connected() {
         events_clone.lock().unwrap().push(event);
     });
 
-    let both = wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000);
-    assert!(both, "Both devices should connect even with duplicate jumpers");
+    let both = wait_for(
+        || mgr.get_info(0).connected && mgr.get_info(1).connected,
+        2000,
+    );
+    assert!(
+        both,
+        "Both devices should connect even with duplicate jumpers"
+    );
 }
 
 // ─── Auto Animation ──────────────────────────────────────────────────────────
@@ -542,7 +616,8 @@ fn animation_auto_enable_disable() {
     assert!(connected);
 
     let gif = make_test_gif();
-    mgr.load_animation(&gif, 0, rustmaniax_sdk::LightsType::Released).unwrap();
+    mgr.load_animation(&gif, 0, rustmaniax_sdk::LightsType::Released)
+        .unwrap();
 
     mgr.set_animation_auto(true);
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -558,7 +633,8 @@ fn animation_auto_double_enable_is_safe() {
     assert!(connected);
 
     let gif = make_test_gif();
-    mgr.load_animation(&gif, 0, rustmaniax_sdk::LightsType::Released).unwrap();
+    mgr.load_animation(&gif, 0, rustmaniax_sdk::LightsType::Released)
+        .unwrap();
 
     mgr.set_animation_auto(true);
     mgr.set_animation_auto(true); // idempotent
@@ -586,7 +662,8 @@ fn animation_auto_pauses_on_direct_set_lights() {
     assert!(connected);
 
     let gif = make_test_gif();
-    mgr.load_animation(&gif, 0, rustmaniax_sdk::LightsType::Released).unwrap();
+    mgr.load_animation(&gif, 0, rustmaniax_sdk::LightsType::Released)
+        .unwrap();
     mgr.set_animation_auto(true);
     std::thread::sleep(std::time::Duration::from_millis(200));
 
@@ -626,11 +703,11 @@ fn animation_auto_pauses_on_direct_set_lights() {
 
 #[test]
 fn set_config_on_old_firmware_sends_128_byte_old_format() {
+    use rustmaniax_sdk::SmxConfig;
     use rustmaniax_sdk::test_helpers::{
         HID_REPORT_DATA, PACKET_FLAG_END_OF_COMMAND, PACKET_FLAG_HOST_CMD_FINISHED,
         PACKET_FLAG_START_OF_COMMAND,
     };
-    use rustmaniax_sdk::SmxConfig;
 
     const HID_MAX_PAYLOAD: usize = 61;
 
@@ -725,7 +802,10 @@ fn set_config_on_old_firmware_sends_128_byte_old_format() {
     // cmd_payload[0] = 'w', cmd_payload[1] = size, rest = config data
     assert_eq!(cmd_payload[0], b'w');
     let config_size = cmd_payload[1];
-    assert_eq!(config_size, 128, "Old firmware config must be 128 bytes, got {config_size}");
+    assert_eq!(
+        config_size, 128,
+        "Old firmware config must be 128 bytes, got {config_size}"
+    );
 
     let config_data = &cmd_payload[2..];
     // Verify modified threshold
@@ -822,7 +902,10 @@ fn lights_command_count(dev: &FakeDevice) -> usize {
 #[test]
 fn set_lights_for_pads_skips_the_deselected_pad() {
     let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
-    assert!(wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000));
+    assert!(wait_for(
+        || mgr.get_info(0).connected && mgr.get_info(1).connected,
+        2000
+    ));
 
     dev_p1.clear_writes();
     dev_p2.clear_writes();
@@ -843,7 +926,10 @@ fn set_lights_for_pads_skips_the_deselected_pad() {
 #[test]
 fn set_lights_still_drives_both_pads() {
     let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
-    assert!(wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000));
+    assert!(wait_for(
+        || mgr.get_info(0).connected && mgr.get_info(1).connected,
+        2000
+    ));
 
     dev_p1.clear_writes();
     dev_p2.clear_writes();
@@ -856,7 +942,10 @@ fn set_lights_still_drives_both_pads() {
 #[test]
 fn reenable_auto_lights_for_pad_leaves_the_other_pad_lit() {
     let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
-    assert!(wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000));
+    assert!(wait_for(
+        || mgr.get_info(0).connected && mgr.get_info(1).connected,
+        2000
+    ));
 
     dev_p1.clear_writes();
     dev_p2.clear_writes();
@@ -879,7 +968,10 @@ fn reenable_auto_lights_for_pad_leaves_the_other_pad_lit() {
 #[test]
 fn reenable_auto_lights_for_pad_drops_only_that_pads_queued_frame() {
     let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
-    assert!(wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000));
+    assert!(wait_for(
+        || mgr.get_info(0).connected && mgr.get_info(1).connected,
+        2000
+    ));
 
     dev_p1.clear_writes();
     dev_p2.clear_writes();

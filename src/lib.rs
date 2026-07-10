@@ -41,8 +41,8 @@ pub use error::SmxError;
 pub use manager::{PanelTestMode, SmxManager};
 
 // Lights and animation.
-pub use lights::{AnimationState, LightsType, UploadCommand, UploadData};
 pub use lights::prepare_upload;
+pub use lights::{AnimationState, LightsType, UploadCommand, UploadData};
 
 // Connection layer (for custom HID backends or testing).
 pub use connection::{CommandCallback, HidDevice, HidDeviceInfo, HidEnumerator, HidapiEnumerator};

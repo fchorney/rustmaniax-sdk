@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::SmxError;
 use crate::protocol::{
-    self, HID_PACKET_SIZE, HID_REPORT_DATA, HID_REPORT_INPUT_STATE, COMMAND_TIMEOUT_SECONDS,
+    self, COMMAND_TIMEOUT_SECONDS, HID_PACKET_SIZE, HID_REPORT_DATA, HID_REPORT_INPUT_STATE,
     SERIAL_SIZE,
 };
 
@@ -284,8 +284,7 @@ impl PollHandle {
                     if changed {
                         self.shared.input_state.store(new_state, Ordering::Relaxed);
                     }
-                    if (changed
-                        || self.shared.always_fire_input.load(Ordering::Relaxed))
+                    if (changed || self.shared.always_fire_input.load(Ordering::Relaxed))
                         && let Some(cb) = self.input_callback.as_ref()
                     {
                         cb(new_state);
@@ -407,7 +406,9 @@ impl CommandHandle {
 
     /// Sets whether the input callback fires on every packet.
     pub fn set_always_fire_input(&self, always: bool) {
-        self.shared.always_fire_input.store(always, Ordering::Relaxed);
+        self.shared
+            .always_fire_input
+            .store(always, Ordering::Relaxed);
     }
 
     /// Returns true if the USB polling thread encountered a read error.
@@ -618,10 +619,11 @@ impl CommandHandle {
                 // If host_cmd_finished, clear the current command and invoke callback.
                 if host_cmd_finished
                     && let Some(cmd) = self.current_command.take()
-                        && let Some(cb) = cmd.callback {
-                            let response = self.read_buffers.back().cloned().unwrap_or_default();
-                            cb(response);
-                        }
+                    && let Some(cb) = cmd.callback
+                {
+                    let response = self.read_buffers.back().cloned().unwrap_or_default();
+                    cb(response);
+                }
             }
         }
     }
@@ -826,7 +828,9 @@ mod tests {
 
         let (poll, _cmd) = open_fake_with_callback(
             dev,
-            Box::new(move |_| { count_clone.fetch_add(1, Ordering::Relaxed); }),
+            Box::new(move |_| {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+            }),
         );
         poll.poll(0);
         // Only fires once for the change from 0 to 0x0001, not for duplicate.
@@ -843,7 +847,9 @@ mod tests {
 
         let (poll, cmd) = open_fake_with_callback(
             dev,
-            Box::new(move |_| { count_clone.fetch_add(1, Ordering::Relaxed); }),
+            Box::new(move |_| {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+            }),
         );
         cmd.set_always_fire_input(true);
         poll.poll(0);
@@ -1019,14 +1025,19 @@ mod tests {
 
         let response = Arc::new(Mutex::new(Vec::new()));
         let resp_clone = Arc::clone(&response);
-        cmd.send_command(b"G", Some(Box::new(move |data| {
-            *resp_clone.lock().unwrap() = data;
-        })));
+        cmd.send_command(
+            b"G",
+            Some(Box::new(move |data| {
+                *resp_clone.lock().unwrap() = data;
+            })),
+        );
         settle(&mut cmd); // sends command
 
         // Queue response with HOST_CMD_FINISHED.
         dev.queue_report6(
-            PACKET_FLAG_START_OF_COMMAND | PACKET_FLAG_END_OF_COMMAND | PACKET_FLAG_HOST_CMD_FINISHED,
+            PACKET_FLAG_START_OF_COMMAND
+                | PACKET_FLAG_END_OF_COMMAND
+                | PACKET_FLAG_HOST_CMD_FINISHED,
             b"Gcfg",
         );
         poll.poll(0);
@@ -1071,11 +1082,14 @@ mod tests {
 
         let called = Arc::new(AtomicU32::new(0));
         let called_clone = Arc::clone(&called);
-        cmd.send_command(b"X", Some(Box::new(move |data| {
-            if data.is_empty() {
-                called_clone.fetch_add(1, Ordering::Relaxed);
-            }
-        })));
+        cmd.send_command(
+            b"X",
+            Some(Box::new(move |data| {
+                if data.is_empty() {
+                    called_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            })),
+        );
         settle(&mut cmd); // sends it (now it's current_command)
 
         cmd.close();
@@ -1116,7 +1130,10 @@ mod tests {
         cmd.pending_commands.clear();
         cmd.send_command(b"y1\n", None);
         cmd.send_command_priority(b"y1\n", None);
-        assert!(!cmd.has_unsent_lights(), "sensor/config commands must not be tagged as lights");
+        assert!(
+            !cmd.has_unsent_lights(),
+            "sensor/config commands must not be tagged as lights"
+        );
     }
 
     #[test]
@@ -1147,7 +1164,8 @@ mod auto_tests {
             Box::new(dev),
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Cycle: update sends request, write triggers auto-response, poll reads it, update processes.
         settle(&mut cmd);

@@ -22,8 +22,7 @@ struct DecodedFrame {
 }
 
 fn decode_gif(data: &[u8]) -> Result<Vec<DecodedFrame>, &'static str> {
-    let decoder = GifDecoder::new(Cursor::new(data))
-        .map_err(|_| "The GIF couldn't be read.")?;
+    let decoder = GifDecoder::new(Cursor::new(data)).map_err(|_| "The GIF couldn't be read.")?;
 
     let frames: Vec<DecodedFrame> = decoder
         .into_frames()
@@ -99,10 +98,8 @@ fn extract_panel(frame: &RgbaImage, panel: usize) -> PanelFrame {
         // Inner 3×3.
         for dy in 0..3 {
             for dx in 0..3 {
-                let px = frame.get_pixel(
-                    (base_x + dx * 2 + 1) as u32,
-                    (base_y + dy * 2 + 1) as u32,
-                );
+                let px =
+                    frame.get_pixel((base_x + dx * 2 + 1) as u32, (base_y + dy * 2 + 1) as u32);
                 rgb[led * 3] = px[0];
                 rgb[led * 3 + 1] = px[1];
                 rgb[led * 3 + 2] = px[2];
@@ -154,7 +151,9 @@ impl AnimationState {
     pub fn new() -> Self {
         Self {
             animations: Default::default(),
-            playback: std::array::from_fn(|_| std::array::from_fn(|_| std::array::from_fn(|_| PlaybackState::default()))),
+            playback: std::array::from_fn(|_| {
+                std::array::from_fn(|_| std::array::from_fn(|_| PlaybackState::default()))
+            }),
         }
     }
 
@@ -260,7 +259,9 @@ impl AnimationState {
 
             // Advance timing.
             for type_idx in 0..2 {
-                let Some(ref anim) = self.animations[pad][type_idx] else { continue };
+                let Some(ref anim) = self.animations[pad][type_idx] else {
+                    continue;
+                };
                 for panel in 0..NUM_PANELS {
                     let ps = &mut self.playback[pad][type_idx][panel];
                     if !ps.playing {
@@ -343,7 +344,11 @@ pub fn prepare_upload(
         }
     }
 
-    let first_graphic: usize = if lights_type == LightsType::Released { 0 } else { 32 };
+    let first_graphic: usize = if lights_type == LightsType::Released {
+        0
+    } else {
+        32
+    };
     let type_idx = lights_type as u8;
 
     // Build palette and pack graphics for each panel.
@@ -470,7 +475,9 @@ fn build_palette(frames: &[PanelFrame]) -> Result<[[u8; 3]; 15], &'static str> {
                 continue; // transparent
             }
             // Check if already in palette.
-            let found = palette[..count].iter().any(|c| c[0] == r && c[1] == g && c[2] == b);
+            let found = palette[..count]
+                .iter()
+                .any(|c| c[0] == r && c[1] == g && c[2] == b);
             if found {
                 continue;
             }
@@ -601,7 +608,9 @@ mod tests {
 
         let mut rgb = vec![0u8; 25 * 3];
         rgb[0] = 255; // LED 0 R
-        rgb[3] = 0; rgb[4] = 255; rgb[5] = 0; // LED 1 = green
+        rgb[3] = 0;
+        rgb[4] = 255;
+        rgb[5] = 0; // LED 1 = green
 
         let frame = PanelFrame { rgb, num_leds: 25 };
         let packed = pack_graphic(&frame, &palette);
@@ -732,18 +741,17 @@ mod tests {
 
     fn create_test_gif(width: u32, height: u32) -> Vec<u8> {
         use image::codecs::gif::GifEncoder;
-        use image::{Frame, RgbaImage, Rgba};
+        use image::{Frame, Rgba, RgbaImage};
         use std::io::Cursor;
 
         let mut img = RgbaImage::new(width, height);
         for y in 0..height {
             for x in 0..width {
-                img.put_pixel(x, y, Rgba([
-                    ((x * 10) % 256) as u8,
-                    ((y * 10) % 256) as u8,
-                    0,
-                    255,
-                ]));
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([((x * 10) % 256) as u8, ((y * 10) % 256) as u8, 0, 255]),
+                );
             }
         }
 
@@ -759,7 +767,7 @@ mod tests {
     /// Creates a GIF with very few colors (suitable for upload palette limit).
     fn create_test_gif_simple(width: u32, height: u32) -> Vec<u8> {
         use image::codecs::gif::GifEncoder;
-        use image::{Frame, RgbaImage, Rgba};
+        use image::{Frame, Rgba, RgbaImage};
         use std::io::Cursor;
 
         let mut img = RgbaImage::new(width, height);
