@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::error::SmxError;
 use crate::protocol::{
@@ -143,7 +145,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 // ─── Shared State (between PollHandle and CommandHandle) ─────────────────────
 
-/// State shared between the USB polling thread and the main I/O thread.
+/// State shared between the USB polling thread, the USB writer thread, and the
+/// main I/O thread.
 struct SharedState {
     /// Current panel press bitmask. Written by poll thread, read by main thread.
     input_state: AtomicU16,
@@ -151,6 +154,13 @@ struct SharedState {
     always_fire_input: AtomicBool,
     /// Set by poll thread if a read error occurs.
     had_read_error: AtomicBool,
+    /// Set by the writer thread if a write fails; surfaced as a disconnect on
+    /// the next `update()`, mirroring `had_read_error`.
+    had_write_error: AtomicBool,
+    /// A command's packets have been handed to the writer thread and are not
+    /// fully on the wire yet. While set, the command stays un-`sent` (its
+    /// response timeout hasn't started) and `wait_writes_idle` blocks.
+    write_in_flight: AtomicBool,
     /// Report 6 packets buffered by poll thread, consumed by main thread.
     report6_buffer: Mutex<Vec<u8>>,
 }
@@ -161,7 +171,54 @@ impl SharedState {
             input_state: AtomicU16::new(0),
             always_fire_input: AtomicBool::new(false),
             had_read_error: AtomicBool::new(false),
+            had_write_error: AtomicBool::new(false),
+            write_in_flight: AtomicBool::new(false),
             report6_buffer: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+// ─── Writer thread ───────────────────────────────────────────────────────────
+
+/// One command's pre-built HID packets, handed to the writer thread.
+type WriteJob = Vec<[u8; HID_PACKET_SIZE]>;
+
+/// USB writer thread body: performs the blocking HID writes for one command at
+/// a time, so no caller (in particular the manager main thread, which runs
+/// under the manager state lock) ever blocks on the wire. `hid_write` to an
+/// interrupt OUT endpoint takes on the order of milliseconds per packet; with
+/// panel lights streaming those writes used to hold the manager state lock in
+/// bursts, stalling every `get_info`-style query on other threads (measured as
+/// visible frame drops in menus that poll pad state each frame).
+///
+/// The main thread hands over at most one command's packets at a time
+/// (`write_in_flight`), preserving the one-command-in-flight pacing. A failed
+/// write sets `had_write_error` and exits; the main thread turns that into a
+/// disconnect on its next `update()`, exactly like a poll-thread read error.
+fn writer_loop(
+    device: Box<dyn HidDevice>,
+    rx: Receiver<WriteJob>,
+    shared: Arc<SharedState>,
+    write_done_notify: Option<Box<dyn Fn() + Send>>,
+) {
+    while let Ok(packets) = rx.recv() {
+        for packet in &packets {
+            let failed = match device.write(packet) {
+                Ok(0) => true,
+                Ok(_) => false,
+                Err(_) => true,
+            };
+            if failed {
+                shared.had_write_error.store(true, Ordering::Release);
+                break;
+            }
+        }
+        shared.write_in_flight.store(false, Ordering::Release);
+        if let Some(notify) = &write_done_notify {
+            notify();
+        }
+        if shared.had_write_error.load(Ordering::Relaxed) {
+            return;
         }
     }
 }
@@ -293,8 +350,13 @@ struct PendingCommand {
 }
 
 /// Handle used by the main I/O thread. Sends commands and processes responses.
+///
+/// The blocking HID writes themselves happen on a dedicated writer thread (see
+/// `writer_loop`); this handle only queues packets to it, so `update()` never
+/// blocks on the wire.
 pub struct CommandHandle {
-    device: Box<dyn HidDevice>,
+    writer_tx: Option<Sender<WriteJob>>,
+    writer_join: Option<JoinHandle<()>>,
     shared: Arc<SharedState>,
     path: String,
 
@@ -415,12 +477,29 @@ impl CommandHandle {
     /// Processes I/O: consumes buffered Report 6 data and sends pending commands.
     /// Returns an error if the device should be disconnected.
     pub fn update(&mut self) -> Result<(), SmxError> {
-        if self.shared.had_read_error.load(Ordering::Relaxed) {
+        if self.shared.had_read_error.load(Ordering::Relaxed)
+            || self.shared.had_write_error.load(Ordering::Relaxed)
+        {
             return Err(SmxError::NotConnected);
         }
         self.check_reads();
         self.check_writes()?;
         Ok(())
+    }
+
+    /// Block until the writer thread has no packets in flight, up to `timeout`.
+    /// Returns false on timeout. Mainly a test aid: `update()` returns before
+    /// the packets are on the wire, so tests that assert on written data (or
+    /// rely on a fake device's write-triggered responses) settle through this.
+    pub fn wait_writes_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while self.shared.write_in_flight.load(Ordering::Acquire) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        true
     }
 
     /// Cancels all pending commands, invoking callbacks with empty data.
@@ -538,31 +617,40 @@ impl CommandHandle {
     }
 
     fn check_writes(&mut self) -> Result<(), SmxError> {
-        if self.current_command.is_some() {
+        if let Some(cmd) = &mut self.current_command {
+            // Promote the command to `sent` once the writer thread has all its
+            // packets on the wire; the response timeout starts from there. If a
+            // response beats this promotion (the poll thread can deliver it
+            // before our next pass), the command completes with `sent` still
+            // false, which is fine: `sent` only gates the timeout retry.
+            if !cmd.sent && !self.shared.write_in_flight.load(Ordering::Acquire) {
+                cmd.sent = true;
+                cmd.sent_at = Some(Instant::now());
+            }
             return Ok(());
         }
         if self.pending_commands.is_empty() {
             return Ok(());
         }
 
-        let mut cmd = self.pending_commands.pop_front().unwrap();
+        let cmd = self.pending_commands.pop_front().unwrap();
 
-        for packet in &cmd.packets {
-            let written = self.device.write(packet)?;
-            if written == 0 {
-                // Write failed — cancel command.
-                if let Some(cb) = cmd.callback {
-                    cb(Vec::new());
-                }
-                return Err(SmxError::Hid(hidapi::HidError::IncompleteSendError {
-                    sent: 0,
-                    all: packet.len(),
-                }));
+        // Hand the packets to the writer thread and keep the command as the
+        // in-flight one. The packets stay in the command too, so a timeout
+        // retry can re-hand them later. A closed channel means the writer
+        // exited (write error); surface the disconnect.
+        self.shared.write_in_flight.store(true, Ordering::Release);
+        let handed_off = self
+            .writer_tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(cmd.packets.clone()).is_ok());
+        if !handed_off {
+            self.shared.write_in_flight.store(false, Ordering::Release);
+            if let Some(cb) = cmd.callback {
+                cb(Vec::new());
             }
+            return Err(SmxError::NotConnected);
         }
-
-        cmd.sent = true;
-        cmd.sent_at = Some(Instant::now());
         self.current_command = Some(cmd);
         Ok(())
     }
@@ -582,15 +670,31 @@ impl CommandHandle {
 
 // ─── Connection Constructor ──────────────────────────────────────────────────
 
+impl Drop for CommandHandle {
+    /// Stop the writer thread: closing the channel ends its `recv` loop; the
+    /// join waits out at most the packet it is mid-write on (a few ms).
+    fn drop(&mut self) {
+        self.writer_tx = None;
+        if let Some(join) = self.writer_join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 /// Opens a connection to an SMX device and returns the split handles.
 ///
-/// `PollHandle` (USB polling thread) owns `read_device`; `CommandHandle` (main
-/// I/O thread) owns `write_device`. These are two independent device handles to
-/// the same physical device, so a read never waits behind a blocking write.
-/// They share atomic state for input and a mutex-protected buffer for Report 6
-/// data, but NOT the device handle (that shared mutex serialized reads behind
-/// multi-millisecond writes; measured on hardware, a colliding read stalled for
-/// the whole write).
+/// `PollHandle` (USB polling thread) owns `read_device`; the writer thread
+/// spawned here owns `write_device` (the `CommandHandle` only queues packets
+/// to it). These are two independent device handles to the same physical
+/// device, and reads, writes, and the manager's own bookkeeping all happen on
+/// separate threads: a read never waits behind a blocking write, and the
+/// manager state lock is never held across one either (that lock used to be,
+/// via `CommandHandle::update()`; measured on hardware, menu-thread pad-state
+/// queries stalled for whole write bursts while lights streamed).
+///
+/// `write_done_notify` is invoked by the writer thread after each command's
+/// packets are on the wire (and on a write error), so the manager can wake
+/// promptly instead of sleeping out its loop interval.
 ///
 /// The two handles must address the same physical device: hidapi opens are
 /// per-handle, and on macOS this requires the `macos-shared-device` feature
@@ -600,6 +704,7 @@ pub fn open_connection(
     read_device: Box<dyn HidDevice>,
     write_device: Box<dyn HidDevice>,
     input_callback: Option<Box<dyn Fn(u16) + Send>>,
+    write_done_notify: Option<Box<dyn Fn() + Send>>,
 ) -> Result<(PollHandle, CommandHandle), SmxError> {
     let shared = Arc::new(SharedState::new());
 
@@ -609,8 +714,16 @@ pub fn open_connection(
         input_callback,
     };
 
+    let (writer_tx, writer_rx) = mpsc::channel::<WriteJob>();
+    let writer_shared = Arc::clone(&shared);
+    let writer_join = std::thread::Builder::new()
+        .name("smx-writer".to_owned())
+        .spawn(move || writer_loop(write_device, writer_rx, writer_shared, write_done_notify))
+        .map_err(|_| SmxError::NotConnected)?;
+
     let mut cmd_handle = CommandHandle {
-        device: write_device,
+        writer_tx: Some(writer_tx),
+        writer_join: Some(writer_join),
         shared,
         path,
         active: false,
@@ -626,6 +739,16 @@ pub fn open_connection(
     cmd_handle.request_device_info(None);
 
     Ok((poll_handle, cmd_handle))
+}
+
+/// Test aid: run one I/O pass, then wait for the async writer thread to put
+/// the packets on the wire. Tests assert on written data and rely on the fake
+/// device's write-triggered auto-responses, both of which need the write to
+/// have actually happened, which `update()` alone no longer guarantees.
+#[cfg(test)]
+fn settle(cmd: &mut CommandHandle) {
+    cmd.update().unwrap();
+    assert!(cmd.wait_writes_idle(Duration::from_secs(2)));
 }
 
 #[cfg(test)]
@@ -646,6 +769,7 @@ mod tests {
             Box::new(device.clone()),
             Box::new(device.clone()),
             None,
+            None,
         )
         .unwrap()
     }
@@ -659,6 +783,7 @@ mod tests {
             Box::new(device.clone()),
             Box::new(device.clone()),
             Some(cb),
+            None,
         )
         .unwrap()
     }
@@ -754,7 +879,7 @@ mod tests {
         let (poll, mut cmd) = open_fake(dev);
         cmd.set_active(true);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
         let pkt = cmd.read_packet().unwrap();
         assert_eq!(pkt, b"AB");
     }
@@ -767,7 +892,7 @@ mod tests {
         let (poll, mut cmd) = open_fake(dev);
         cmd.set_active(true);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
         let pkt = cmd.read_packet().unwrap();
         assert_eq!(pkt, b"Hello W");
     }
@@ -783,7 +908,7 @@ mod tests {
         let (poll, mut cmd) = open_fake(dev);
         cmd.set_active(true);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
         let pkt = cmd.read_packet().unwrap();
         assert_eq!(pkt, b"new!");
     }
@@ -798,7 +923,7 @@ mod tests {
         let (poll, mut cmd) = open_fake(dev);
         // Don't set active.
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
         assert!(cmd.read_packet().is_none());
     }
 
@@ -811,12 +936,12 @@ mod tests {
         assert!(!cmd.is_connected_with_info());
 
         // First update sends the device info request.
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         // Now queue the response (simulating device replying).
         dev.queue_device_info_response(false, 7, &serial);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         assert!(cmd.is_connected_with_info());
         let info = cmd.device_info();
@@ -831,11 +956,11 @@ mod tests {
         let serial = [0u8; SERIAL_SIZE];
 
         let (poll, mut cmd) = open_fake(dev.clone());
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         dev.queue_device_info_response(true, 3, &serial);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         let info = cmd.device_info();
         assert!(info.is_player2);
@@ -850,12 +975,12 @@ mod tests {
 
         let (poll, mut cmd) = open_fake(dev.clone());
         // Complete handshake first.
-        cmd.update().unwrap();
+        settle(&mut cmd);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         cmd.send_command(b"hello", None);
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         let writes = dev.get_writes();
         // First write is device info request, second is our command.
@@ -877,9 +1002,9 @@ mod tests {
         dev.queue_device_info_response(false, 5, &serial);
 
         let (poll, mut cmd) = open_fake(dev.clone());
-        cmd.update().unwrap();
+        settle(&mut cmd);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
         cmd.set_active(true);
 
         let response = Arc::new(Mutex::new(Vec::new()));
@@ -887,7 +1012,7 @@ mod tests {
         cmd.send_command(b"G", Some(Box::new(move |data| {
             *resp_clone.lock().unwrap() = data;
         })));
-        cmd.update().unwrap(); // sends command
+        settle(&mut cmd); // sends command
 
         // Queue response with HOST_CMD_FINISHED.
         dev.queue_report6(
@@ -895,7 +1020,7 @@ mod tests {
             b"Gcfg",
         );
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         assert_eq!(*response.lock().unwrap(), b"Gcfg");
     }
@@ -907,14 +1032,14 @@ mod tests {
         dev.queue_device_info_response(false, 5, &serial);
 
         let (poll, mut cmd) = open_fake(dev.clone());
-        cmd.update().unwrap();
+        settle(&mut cmd);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         // Queue two commands.
         cmd.send_command(b"A", None);
         cmd.send_command(b"B", None);
-        cmd.update().unwrap(); // sends first
+        settle(&mut cmd); // sends first
 
         let writes = dev.get_writes();
         // Should only have device info + first command so far.
@@ -930,9 +1055,9 @@ mod tests {
         dev.queue_device_info_response(false, 5, &serial);
 
         let (poll, mut cmd) = open_fake(dev);
-        cmd.update().unwrap();
+        settle(&mut cmd);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         let called = Arc::new(AtomicU32::new(0));
         let called_clone = Arc::clone(&called);
@@ -941,7 +1066,7 @@ mod tests {
                 called_clone.fetch_add(1, Ordering::Relaxed);
             }
         })));
-        cmd.update().unwrap(); // sends it (now it's current_command)
+        settle(&mut cmd); // sends it (now it's current_command)
 
         cmd.close();
         assert_eq!(called.load(Ordering::Relaxed), 1);
@@ -954,12 +1079,17 @@ mod tests {
         dev.queue_device_info_response(false, 5, &serial);
 
         let (poll, mut cmd) = open_fake(dev.clone());
-        cmd.update().unwrap();
+        settle(&mut cmd);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
 
         dev.set_fail_writes(true);
         cmd.send_command(b"X", None);
+        // The hand-off itself succeeds; the writer thread hits the failure and
+        // flags it, and the NEXT update surfaces it as a disconnect (same
+        // deferred shape as a poll-thread read error).
+        cmd.update().unwrap();
+        assert!(cmd.wait_writes_idle(Duration::from_secs(2)));
         let result = cmd.update();
         assert!(result.is_err());
     }
@@ -1006,12 +1136,13 @@ mod auto_tests {
             Box::new(dev.clone()),
             Box::new(dev),
             None,
+            None,
         ).unwrap();
 
         // Cycle: update sends request, write triggers auto-response, poll reads it, update processes.
-        cmd.update().unwrap();
+        settle(&mut cmd);
         poll.poll(0);
-        cmd.update().unwrap();
+        settle(&mut cmd);
         assert!(cmd.is_connected_with_info(), "device info not received");
         assert_eq!(cmd.device_info().firmware_version, 5);
     }
