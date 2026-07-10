@@ -260,6 +260,11 @@ impl SmxManager {
             cmd.pad_command_len[pad] = 0;
         }
         if let Some(conn) = state.devices[pad].connection_mut() {
+            // The main thread loop can have already moved a frame out of the staging
+            // list above and into this pad's own connection queue before we got the
+            // lock; drop it there too, or a queued frame still lands and immediately
+            // re-disables the lighting we're enabling.
+            conn.drop_queued_lights();
             conn.send_command(b"S 1\n", None);
         }
     }

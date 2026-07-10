@@ -469,6 +469,16 @@ impl CommandHandle {
         self.pending_commands.iter().any(|c| c.is_lights)
     }
 
+    /// Drops any not-yet-dispatched panel-lights commands from the queue. A frame
+    /// can already have been moved out of the manager's staging list and into this
+    /// connection's own queue before a caller clears its share there, so re-enabling
+    /// auto lights for this pad must also purge them here or a queued frame can still
+    /// land and immediately re-disable the lighting. A command already handed to the
+    /// writer thread (in flight) can't be recalled; that residual window is negligible.
+    pub fn drop_queued_lights(&mut self) {
+        self.pending_commands.retain(|c| !c.is_lights);
+    }
+
     /// Reads a completed response packet from the buffer.
     pub fn read_packet(&mut self) -> Option<Vec<u8>> {
         self.read_buffers.pop_front()

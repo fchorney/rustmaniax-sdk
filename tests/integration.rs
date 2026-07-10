@@ -198,12 +198,15 @@ fn panel_test_mode_sends_t_command() {
 
     dev.clear_writes();
     mgr.set_panel_test_mode(PanelTestMode::PressureTest);
-    std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let writes = dev.get_writes();
-    let has_t = writes.iter().any(|w| {
-        w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'1'
-    });
+    let has_t = wait_for(
+        || {
+            dev.get_writes().iter().any(|w| {
+                w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'1'
+            })
+        },
+        2000,
+    );
     assert!(has_t, "Expected 't 1' command");
 }
 
