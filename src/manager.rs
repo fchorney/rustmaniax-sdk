@@ -239,11 +239,28 @@ impl SmxManager {
 
     /// Re-enables automatic panel lighting on both pads.
     pub fn reenable_auto_lights(&self) {
+        for pad in 0..2 {
+            self.reenable_auto_lights_for_pad(pad);
+        }
+    }
+
+    /// Re-enables automatic panel lighting on a single pad, leaving the other
+    /// pad's lighting (and any frame queued for it) untouched.
+    ///
+    /// Drops `pad`'s share of every queued lights frame first: a frame already
+    /// pending would otherwise land after the command below and immediately
+    /// re-disable the auto-lighting we just asked for. The other pad's share of
+    /// those same frames is preserved, so its animation neither stalls nor skips.
+    pub fn reenable_auto_lights_for_pad(&self, pad: usize) {
+        if pad >= 2 {
+            return;
+        }
         let mut state = self.shared.state.lock().unwrap();
-        for device in &mut state.devices {
-            if let Some(conn) = device.connection_mut() {
-                conn.send_command(b"S 1\n", None);
-            }
+        for cmd in &mut state.pending_lights {
+            cmd.pad_command_len[pad] = 0;
+        }
+        if let Some(conn) = state.devices[pad].connection_mut() {
+            conn.send_command(b"S 1\n", None);
         }
     }
 
@@ -332,13 +349,28 @@ impl SmxManager {
 
     /// Sets panel LED colors for both pads.
     pub fn set_lights(&self, light_data: &[u8]) {
+        self.set_lights_for_pads(light_data, [true; 2]);
+    }
+
+    /// Sets panel LED colors for the pads selected by `pads`.
+    ///
+    /// `light_data` always covers both pads (the same layout `set_lights`
+    /// takes); a pad whose entry in `pads` is `false` has its slice ignored and
+    /// receives no lights command at all. Because a pad returns to its firmware
+    /// auto-lighting once it stops receiving lights commands, deselecting a pad
+    /// hands its LEDs back rather than lighting it black. Use
+    /// `reenable_auto_lights_for_pad` to skip the firmware's timeout.
+    ///
+    /// Both pads' commands are still queued together, so a frame sent to one pad
+    /// never drifts out of phase with the other's.
+    pub fn set_lights_for_pads(&self, light_data: &[u8], pads: [bool; 2]) {
         // Pause auto-animation when lights are set directly.
         if self.shared.anim_running.load(Ordering::Relaxed) {
             *self.shared.anim_pause_until.lock().unwrap() =
                 Some(Instant::now() + Duration::from_secs_f64(crate::protocol::ANIMATION_PAUSE_DURATION));
         }
         let mut state = self.shared.state.lock().unwrap();
-        set_lights_inner(&mut state, light_data);
+        set_lights_inner(&mut state, light_data, pads);
         drop(state);
         self.shared.wake.notify_all();
     }
@@ -506,7 +538,7 @@ fn animation_thread_loop(shared: Arc<ManagerShared>) {
         {
             let mut state = shared.state.lock().unwrap();
             let _hold = crate::profile::hold(crate::profile::Site::AnimLights);
-            set_lights_inner(&mut state, &frame);
+            set_lights_inner(&mut state, &frame, [true; 2]);
         }
         shared.wake.notify_all();
 
@@ -912,7 +944,13 @@ fn update_panel_test_mode(state: &mut ManagerState) {
 
 
 #[allow(clippy::needless_range_loop)]
-fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
+/// Builds and queues the lights commands for the pads selected by `pads`.
+///
+/// A deselected pad keeps `cmd_lens` at zero, which becomes `pad_command_len == 0`
+/// on the queued frame; `send_pending_lights` skips any pad whose length is zero,
+/// so nothing reaches it and its firmware auto-lighting resumes. The selected pad's
+/// commands still share the frame, keeping the two pads in phase.
+fn set_lights_inner(state: &mut ManagerState, light_data: &[u8], pads: [bool; 2]) {
     if state.panel_test_mode != PanelTestMode::Off {
         return;
     }
@@ -933,6 +971,9 @@ fn set_lights_inner(state: &mut ManagerState, light_data: &[u8]) {
     let mut cmd_lens = [[0usize; 2]; 3];
 
     for pad in 0..2 {
+        if !pads[pad] {
+            continue;
+        }
         let pad_data = &light_data[pad * bytes_per_pad..(pad + 1) * bytes_per_pad];
 
         let mut len4 = 0usize;

@@ -805,3 +805,92 @@ fn transient_write_handle_open_failure_retries_and_connects() {
         "device should reconnect after a transient write-handle open failure (path must not be permanently failed)"
     );
 }
+
+// ─── Per-pad lights ownership ────────────────────────────────────────────────
+
+/// Count the lights commands ('4', '2', '3') a fake device received.
+fn lights_command_count(dev: &FakeDevice) -> usize {
+    dev.get_writes()
+        .iter()
+        .filter(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && matches!(w[3], b'4' | b'2' | b'3'))
+        .count()
+}
+
+#[test]
+fn set_lights_for_pads_skips_the_deselected_pad() {
+    let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
+    assert!(wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000));
+
+    dev_p1.clear_writes();
+    dev_p2.clear_writes();
+    mgr.set_lights_for_pads(&[128u8; 1350], [true, false]);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    assert!(
+        lights_command_count(&dev_p1) > 0,
+        "selected pad should still receive its lights commands"
+    );
+    assert_eq!(
+        lights_command_count(&dev_p2),
+        0,
+        "deselected pad must receive no lights command at all, so its firmware auto-lighting resumes"
+    );
+}
+
+#[test]
+fn set_lights_still_drives_both_pads() {
+    let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
+    assert!(wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000));
+
+    dev_p1.clear_writes();
+    dev_p2.clear_writes();
+    mgr.set_lights(&[128u8; 1350]);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    assert!(lights_command_count(&dev_p1) > 0 && lights_command_count(&dev_p2) > 0);
+}
+
+#[test]
+fn reenable_auto_lights_for_pad_leaves_the_other_pad_lit() {
+    let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
+    assert!(wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000));
+
+    dev_p1.clear_writes();
+    dev_p2.clear_writes();
+    mgr.reenable_auto_lights_for_pad(1);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let is_auto_lights = |w: &Vec<u8>| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'S';
+    assert!(
+        dev_p2.get_writes().iter().any(is_auto_lights),
+        "the named pad should be handed back to its firmware"
+    );
+    assert!(
+        !dev_p1.get_writes().iter().any(is_auto_lights),
+        "the other pad must not be released"
+    );
+}
+
+/// A frame queued before the release must not land afterwards and re-disable the
+/// auto-lighting; the other pad's share of that same frame must survive.
+#[test]
+fn reenable_auto_lights_for_pad_drops_only_that_pads_queued_frame() {
+    let (mgr, dev_p1, dev_p2, _events) = make_manager_two_devices();
+    assert!(wait_for(|| mgr.get_info(0).connected && mgr.get_info(1).connected, 2000));
+
+    dev_p1.clear_writes();
+    dev_p2.clear_writes();
+    mgr.set_lights(&[128u8; 1350]);
+    mgr.reenable_auto_lights_for_pad(1);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    assert_eq!(
+        lights_command_count(&dev_p2),
+        0,
+        "the released pad's queued lights must be dropped, or they re-disable auto-lighting"
+    );
+    assert!(
+        lights_command_count(&dev_p1) > 0,
+        "the other pad's share of the same queued frame must still be sent"
+    );
+}
