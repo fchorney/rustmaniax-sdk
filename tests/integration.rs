@@ -168,17 +168,20 @@ fn factory_reset_sends_f_and_g_commands() {
 
     dev.clear_writes();
     mgr.factory_reset(0);
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let writes = dev.get_writes();
-    let has_f = writes
-        .iter()
-        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'f');
-    let has_g = writes
-        .iter()
-        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'G');
-    assert!(has_f, "Expected 'f' command");
-    assert!(has_g, "Expected 'G' command");
+    let has_both = wait_for(
+        || {
+            let writes = dev.get_writes();
+            let has_f = writes
+                .iter()
+                .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'f');
+            let has_g = writes
+                .iter()
+                .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'G');
+            has_f && has_g
+        },
+        2000,
+    );
+    assert!(has_both, "Expected 'f' and 'G' commands");
 }
 
 #[test]
@@ -189,12 +192,14 @@ fn force_recalibration_sends_c_command() {
 
     dev.clear_writes();
     mgr.force_recalibration(0);
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let writes = dev.get_writes();
-    let has_c = writes
-        .iter()
-        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'C');
+    let has_c = wait_for(
+        || {
+            dev.get_writes()
+                .iter()
+                .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'C')
+        },
+        2000,
+    );
     assert!(has_c, "Expected 'C' command");
 }
 
@@ -206,12 +211,18 @@ fn reenable_auto_lights_sends_command() {
 
     dev.clear_writes();
     mgr.reenable_auto_lights();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let writes = dev.get_writes();
-    let has_s = writes.iter().any(|w| {
-        w.len() > 6 && w[0] == HID_REPORT_COMMAND && w[3] == b'S' && w[4] == b' ' && w[5] == b'1'
-    });
+    let has_s = wait_for(
+        || {
+            dev.get_writes().iter().any(|w| {
+                w.len() > 6
+                    && w[0] == HID_REPORT_COMMAND
+                    && w[3] == b'S'
+                    && w[4] == b' '
+                    && w[5] == b'1'
+            })
+        },
+        2000,
+    );
     assert!(has_s, "Expected 'S 1' command");
 }
 
@@ -243,12 +254,14 @@ fn set_serial_numbers_sends_s_command() {
 
     dev.clear_writes();
     mgr.set_serial_numbers();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let writes = dev.get_writes();
-    let has_s = writes
-        .iter()
-        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b's' && w[2] >= 18);
+    let has_s = wait_for(
+        || {
+            dev.get_writes()
+                .iter()
+                .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b's' && w[2] >= 18)
+        },
+        2000,
+    );
     assert!(has_s, "Expected 's' command with serial data");
 }
 
@@ -479,7 +492,15 @@ fn set_lights_blocked_during_panel_test_mode() {
     assert!(connected);
 
     mgr.set_panel_test_mode(PanelTestMode::PressureTest);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    let entered_test_mode = wait_for(
+        || {
+            dev.get_writes()
+                .iter()
+                .any(|w| w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'1')
+        },
+        2000,
+    );
+    assert!(entered_test_mode);
 
     dev.clear_writes();
     mgr.set_lights(&[128u8; 1350]);
@@ -506,12 +527,14 @@ fn set_lights_fw4_sends_4_command() {
 
     dev.clear_writes();
     mgr.set_lights(&[128u8; 1350]);
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let writes = dev.get_writes();
-    let has_4 = writes
-        .iter()
-        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'4');
+    let has_4 = wait_for(
+        || {
+            dev.get_writes()
+                .iter()
+                .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'4')
+        },
+        2000,
+    );
     assert!(has_4, "Expected '4' command for fw>=4 (25-LED inner grid)");
 }
 
@@ -523,21 +546,26 @@ fn set_lights_fw3_no_4_command() {
 
     dev.clear_writes();
     mgr.set_lights(&[128u8; 1350]);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    let has_both = wait_for(
+        || {
+            let writes = dev.get_writes();
+            let has_2 = writes
+                .iter()
+                .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'2');
+            let has_3 = writes
+                .iter()
+                .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'3');
+            has_2 && has_3
+        },
+        2000,
+    );
+    assert!(has_both, "Should still send '2' and '3' commands");
 
     let writes = dev.get_writes();
     let has_4 = writes
         .iter()
         .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'4');
     assert!(!has_4, "Should NOT send '4' command for fw<4");
-
-    let has_2 = writes
-        .iter()
-        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'2');
-    let has_3 = writes
-        .iter()
-        .any(|w| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'3');
-    assert!(has_2 && has_3, "Should still send '2' and '3' commands");
 }
 
 // ─── Panel Test Mode ─────────────────────────────────────────────────────────
@@ -549,16 +577,26 @@ fn panel_test_mode_off_sends_t_0() {
     assert!(connected);
 
     mgr.set_panel_test_mode(PanelTestMode::PressureTest);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    let entered_test_mode = wait_for(
+        || {
+            dev.get_writes()
+                .iter()
+                .any(|w| w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'1')
+        },
+        2000,
+    );
+    assert!(entered_test_mode);
 
     dev.clear_writes();
     mgr.set_panel_test_mode(PanelTestMode::Off);
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let writes = dev.get_writes();
-    let has_t0 = writes
-        .iter()
-        .any(|w| w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'0');
+    let has_t0 = wait_for(
+        || {
+            dev.get_writes()
+                .iter()
+                .any(|w| w.len() > 5 && w[0] == HID_REPORT_COMMAND && w[3] == b't' && w[5] == b'0')
+        },
+        2000,
+    );
     assert!(has_t0, "Expected 't 0' command when disabling test mode");
 }
 
@@ -910,10 +948,10 @@ fn set_lights_for_pads_skips_the_deselected_pad() {
     dev_p1.clear_writes();
     dev_p2.clear_writes();
     mgr.set_lights_for_pads(&[128u8; 1350], [true, false]);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    let got_it = wait_for(|| lights_command_count(&dev_p1) > 0, 2000);
 
     assert!(
-        lights_command_count(&dev_p1) > 0,
+        got_it,
         "selected pad should still receive its lights commands"
     );
     assert_eq!(
@@ -934,9 +972,11 @@ fn set_lights_still_drives_both_pads() {
     dev_p1.clear_writes();
     dev_p2.clear_writes();
     mgr.set_lights(&[128u8; 1350]);
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    assert!(lights_command_count(&dev_p1) > 0 && lights_command_count(&dev_p2) > 0);
+    let got_both = wait_for(
+        || lights_command_count(&dev_p1) > 0 && lights_command_count(&dev_p2) > 0,
+        2000,
+    );
+    assert!(got_both);
 }
 
 #[test]
@@ -950,11 +990,11 @@ fn reenable_auto_lights_for_pad_leaves_the_other_pad_lit() {
     dev_p1.clear_writes();
     dev_p2.clear_writes();
     mgr.reenable_auto_lights_for_pad(1);
-    std::thread::sleep(std::time::Duration::from_millis(200));
 
     let is_auto_lights = |w: &Vec<u8>| w.len() > 3 && w[0] == HID_REPORT_COMMAND && w[3] == b'S';
+    let got_it = wait_for(|| dev_p2.get_writes().iter().any(is_auto_lights), 2000);
     assert!(
-        dev_p2.get_writes().iter().any(is_auto_lights),
+        got_it,
         "the named pad should be handed back to its firmware"
     );
     assert!(
