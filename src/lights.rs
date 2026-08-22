@@ -5,7 +5,17 @@ use std::io::Cursor;
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder, RgbaImage};
 
-use crate::protocol::{LED_COLOR_SCALE, NUM_PANELS};
+use crate::protocol::{BYTES_PER_PAD_25, LED_COLOR_SCALE, NUM_PANELS};
+
+const COLOR_SCALE: [u8; 256] = {
+    let mut values = [0; 256];
+    let mut i = 0;
+    while i < values.len() {
+        values[i] = (i as f32 * LED_COLOR_SCALE) as u8;
+        i += 1;
+    }
+    values
+};
 
 /// Animation slot type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,10 +223,21 @@ impl AnimationState {
     /// Build a frame of light data for both pads (returns BYTES_PER_PAD_25 * 2 bytes).
     /// `input_states` is [pad0_state, pad1_state] bitmasks.
     pub fn build_frame(&mut self, input_states: [u16; 2]) -> Vec<u8> {
+        let mut light_data = vec![0; BYTES_PER_PAD_25 * 2];
+        self.build_frame_into(input_states, &mut light_data);
+        light_data
+    }
+
+    /// Builds a frame into caller-owned storage, reusing it across animation ticks.
+    ///
+    /// `light_data` must contain exactly two 25-LED pads
+    /// (`2 * BYTES_PER_PAD_25` bytes). Existing contents are cleared first.
+    pub fn build_frame_into(&mut self, input_states: [u16; 2], light_data: &mut [u8]) {
         let dt = 1.0 / 30.0f32;
         let bytes_per_panel = 25 * 3;
         let bytes_per_pad = NUM_PANELS * bytes_per_panel;
-        let mut light_data = vec![0u8; bytes_per_pad * 2];
+        assert_eq!(light_data.len(), bytes_per_pad * 2);
+        light_data.fill(0);
 
         for pad in 0..2 {
             for panel in 0..NUM_PANELS {
@@ -278,8 +299,6 @@ impl AnimationState {
                 }
             }
         }
-
-        light_data
     }
 }
 
@@ -287,7 +306,7 @@ impl AnimationState {
 
 /// Apply the LED color scaling factor.
 pub fn scale_color(c: u8) -> u8 {
-    (c as f32 * LED_COLOR_SCALE) as u8
+    COLOR_SCALE[c as usize]
 }
 
 /// Prepared upload data ready to be sent to a device.
@@ -393,9 +412,9 @@ pub fn prepare_upload(
         let palette_offset = 64 * 13 + (type_idx as usize) * 45;
         let mut palette_bytes = [0u8; 45];
         for (i, color) in pd.palette.iter().enumerate() {
-            palette_bytes[i * 3] = (color[0] as f32 * LED_COLOR_SCALE) as u8;
-            palette_bytes[i * 3 + 1] = (color[1] as f32 * LED_COLOR_SCALE) as u8;
-            palette_bytes[i * 3 + 2] = (color[2] as f32 * LED_COLOR_SCALE) as u8;
+            palette_bytes[i * 3] = scale_color(color[0]);
+            palette_bytes[i * 3 + 1] = scale_color(color[1]);
+            palette_bytes[i * 3 + 2] = scale_color(color[2]);
         }
         create_upload_packets(
             &mut panel_packets[panel],
@@ -714,12 +733,36 @@ mod tests {
     }
 
     #[test]
+    fn reusable_frame_matches_allocating_api() {
+        let gif_data = create_test_gif(23, 24);
+        let mut allocating = AnimationState::new();
+        let mut reusable = AnimationState::new();
+        for state in [&mut allocating, &mut reusable] {
+            state.load(&gif_data, 0, LightsType::Released).unwrap();
+            state.load(&gif_data, 0, LightsType::Pressed).unwrap();
+        }
+
+        let mut reused = [0xFF; 2 * BYTES_PER_PAD_25];
+        for inputs in [[0, 0], [1, 0], [0x1FF, 0], [0, 0]] {
+            let allocated = allocating.build_frame(inputs);
+            reusable.build_frame_into(inputs, &mut reused);
+            assert_eq!(allocated, reused);
+        }
+    }
+
+    #[test]
+    fn reusable_frame_clears_previous_contents() {
+        let mut state = AnimationState::new();
+        let mut frame = [0xFF; 2 * BYTES_PER_PAD_25];
+        state.build_frame_into([0, 0], &mut frame);
+        assert!(frame.iter().all(|&value| value == 0));
+    }
+
+    #[test]
     fn color_scaling() {
-        // 255 * 0.6666 ≈ 169.98 → 169
-        let scaled = scale_color(255);
-        assert!(scaled == 169 || scaled == 170);
-        assert_eq!(scale_color(0), 0);
-        assert_eq!(scale_color(128), (128.0 * LED_COLOR_SCALE) as u8);
+        for value in u8::MIN..=u8::MAX {
+            assert_eq!(scale_color(value), (value as f32 * LED_COLOR_SCALE) as u8);
+        }
     }
 
     #[test]

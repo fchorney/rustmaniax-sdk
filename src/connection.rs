@@ -601,7 +601,7 @@ impl CommandHandle {
 
                 let cmd = self.current_command.take().unwrap();
                 if let Some(cb) = cmd.callback {
-                    cb(payload.clone());
+                    cb(payload.to_vec());
                 }
             }
             protocol::ParsedPacket::Fragment { .. } => {
