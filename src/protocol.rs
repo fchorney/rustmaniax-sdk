@@ -112,12 +112,12 @@ pub fn build_device_info_request() -> [u8; HID_PACKET_SIZE] {
 
 /// Result of parsing a single incoming Report 6 packet.
 #[derive(Debug)]
-pub enum ParsedPacket {
+pub enum ParsedPacket<'a> {
     /// Device info response (raw payload bytes).
-    DeviceInfo(Vec<u8>),
+    DeviceInfo(&'a [u8]),
     /// A fragment of a command response. Accumulate until `end_of_command` is true.
     Fragment {
-        payload: Vec<u8>,
+        payload: &'a [u8],
         start_of_command: bool,
         end_of_command: bool,
         host_cmd_finished: bool,
@@ -128,7 +128,7 @@ pub enum ParsedPacket {
 ///
 /// Expected format: [report_id=0x06][flags][payload_len][payload...]
 /// Returns None if the packet is too short or has wrong report ID.
-pub fn parse_report6(raw: &[u8]) -> Option<ParsedPacket> {
+pub fn parse_report6(raw: &[u8]) -> Option<ParsedPacket<'_>> {
     if raw.len() < 3 || raw[0] != HID_REPORT_DATA {
         return None;
     }
@@ -140,7 +140,7 @@ pub fn parse_report6(raw: &[u8]) -> Option<ParsedPacket> {
         return None;
     }
 
-    let payload = raw[3..3 + payload_len].to_vec();
+    let payload = &raw[3..3 + payload_len];
 
     if flags & PACKET_FLAG_DEVICE_INFO != 0 {
         Some(ParsedPacket::DeviceInfo(payload))
@@ -170,7 +170,7 @@ impl PacketReassembler {
 
     /// Pushes a parsed fragment into the reassembler.
     /// Returns true if `host_cmd_finished` was set on this fragment.
-    pub fn push(&mut self, fragment: &ParsedPacket) -> bool {
+    pub fn push(&mut self, fragment: &ParsedPacket<'_>) -> bool {
         match fragment {
             ParsedPacket::Fragment {
                 payload,
@@ -269,7 +269,7 @@ mod tests {
         ];
         let parsed = parse_report6(&raw).unwrap();
         match parsed {
-            ParsedPacket::DeviceInfo(payload) => assert_eq!(payload, vec![0xAA, 0xBB, 0xCC]),
+            ParsedPacket::DeviceInfo(payload) => assert_eq!(payload, [0xAA, 0xBB, 0xCC]),
             _ => panic!("expected DeviceInfo"),
         }
 
@@ -279,10 +279,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_report6_borrows_payload() {
+        let raw = [HID_REPORT_DATA, PACKET_FLAG_DEVICE_INFO, 3, 1, 2, 3];
+        let ParsedPacket::DeviceInfo(payload) = parse_report6(&raw).unwrap() else {
+            panic!("expected device info");
+        };
+        assert_eq!(payload, [1, 2, 3]);
+        assert_eq!(payload.as_ptr(), raw[3..].as_ptr());
+    }
+
+    #[test]
     fn reassemble_single_fragment() {
         let mut reassembler = PacketReassembler::new();
         let fragment = ParsedPacket::Fragment {
-            payload: vec![1, 2, 3],
+            payload: &[1, 2, 3],
             start_of_command: true,
             end_of_command: true,
             host_cmd_finished: false,
@@ -297,7 +307,7 @@ mod tests {
         let mut reassembler = PacketReassembler::new();
 
         reassembler.push(&ParsedPacket::Fragment {
-            payload: vec![1, 2],
+            payload: &[1, 2],
             start_of_command: true,
             end_of_command: false,
             host_cmd_finished: false,
@@ -305,7 +315,7 @@ mod tests {
         assert!(reassembler.take_completed().is_empty());
 
         reassembler.push(&ParsedPacket::Fragment {
-            payload: vec![3, 4],
+            payload: &[3, 4],
             start_of_command: false,
             end_of_command: true,
             host_cmd_finished: false,
@@ -320,7 +330,7 @@ mod tests {
 
         // Start a command but don't finish it.
         reassembler.push(&ParsedPacket::Fragment {
-            payload: vec![0xFF],
+            payload: &[0xFF],
             start_of_command: true,
             end_of_command: false,
             host_cmd_finished: false,
@@ -328,7 +338,7 @@ mod tests {
 
         // New start discards the partial.
         reassembler.push(&ParsedPacket::Fragment {
-            payload: vec![0xAA],
+            payload: &[0xAA],
             start_of_command: true,
             end_of_command: true,
             host_cmd_finished: false,
@@ -396,7 +406,7 @@ mod tests {
                 end_of_command,
                 host_cmd_finished,
             } => {
-                assert_eq!(payload, vec![1, 2, 3]);
+                assert_eq!(payload, [1, 2, 3]);
                 assert!(start_of_command);
                 assert!(!end_of_command);
                 assert!(host_cmd_finished);
@@ -409,7 +419,7 @@ mod tests {
     fn reassembler_host_cmd_finished_returns_true() {
         let mut reassembler = PacketReassembler::new();
         let fragment = ParsedPacket::Fragment {
-            payload: vec![1],
+            payload: &[1],
             start_of_command: true,
             end_of_command: true,
             host_cmd_finished: true,
@@ -421,7 +431,7 @@ mod tests {
     #[test]
     fn reassembler_ignores_device_info() {
         let mut reassembler = PacketReassembler::new();
-        let result = reassembler.push(&ParsedPacket::DeviceInfo(vec![1, 2, 3]));
+        let result = reassembler.push(&ParsedPacket::DeviceInfo(&[1, 2, 3]));
         assert!(!result);
         assert!(reassembler.take_completed().is_empty());
     }

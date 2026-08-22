@@ -58,3 +58,13 @@ required-features = ["sample"]
 
 [lints.clippy]
 perf = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "performance"
+harness = false
+
+[profile.bench]
+debug = 1

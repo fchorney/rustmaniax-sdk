@@ -523,6 +523,7 @@ fn pad_poll_loop(poll: PollHandle, stop: Arc<AtomicBool>, shared: Arc<ManagerSha
 
 fn animation_thread_loop(shared: Arc<ManagerShared>) {
     let frame_duration = Duration::from_millis(33); // ~30 FPS
+    let mut frame = [0; 2 * BYTES_PER_PAD_25];
 
     while shared.anim_running.load(Ordering::Relaxed) && !shared.shutdown.load(Ordering::Relaxed) {
         let frame_start = Instant::now();
@@ -555,10 +556,10 @@ fn animation_thread_loop(shared: Arc<ManagerShared>) {
             continue;
         }
 
-        let frame = {
+        {
             let mut anim = shared.animation.lock().unwrap();
-            anim.build_frame(input_states)
-        };
+            anim.build_frame_into(input_states, &mut frame);
+        }
 
         // Send lights (bypasses the pause logic by going directly to set_lights_inner).
         {

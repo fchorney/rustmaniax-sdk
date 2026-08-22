@@ -96,6 +96,9 @@ mgr.reenable_auto_lights_for_pad(1);
 cargo build
 cargo test
 cargo clippy
+
+# Old-vs-new CPU, throughput, and allocation benchmarks
+cargo bench --bench performance -- --noplot
 ```
 
 ## Running the Sample
