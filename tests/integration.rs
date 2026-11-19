@@ -927,6 +927,30 @@ fn transient_write_handle_open_failure_retries_and_connects() {
     );
 }
 
+#[test]
+fn transient_read_handle_open_failure_retries_and_connects() {
+    // Fail the 1st open (the read handle), as happens on Linux when a freshly
+    // hot-plugged hidraw node is enumerated before udev has applied its
+    // permissions (EACCES), then let everything succeed. The path must not be
+    // written off on the first failure: the device should connect on a later
+    // enumeration (open #1 read FAIL -> retry; #2 read ok, #3 write ok).
+    let dev = FakeDevice::new_auto(false, 5);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = Arc::clone(&events);
+
+    let enumerator = FlakyEnumerator::new("/dev/smx0", dev, vec![1]);
+    let mgr = SmxManager::new(Box::new(enumerator), move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Enumeration is rate-limited to ~1s, so the retry lands on the next pass.
+    let connected = wait_for(|| mgr.get_info(0).connected, 4000);
+    assert!(
+        connected,
+        "device should connect after a transient read-handle open failure (path must not be permanently failed)"
+    );
+}
+
 // ─── Per-pad lights ownership ────────────────────────────────────────────────
 
 /// Count the lights commands ('4', '2', '3') a fake device received.

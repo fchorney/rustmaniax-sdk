@@ -96,8 +96,12 @@ struct ManagerState {
     last_input_state: [u16; 2],
     always_fire_input: bool,
 
-    // Paths that failed to open (removed when the device disappears from enumeration).
-    failed_paths: Vec<String>,
+    // Paths whose read open failed, with the number of failed attempts. An entry
+    // is dropped when the device disappears from enumeration. A freshly plugged
+    // hidraw node is briefly root-only until udev applies its rules, so an open
+    // can fail with EACCES and succeed a moment later: retry on later
+    // enumerations and only give up after MAX_OPEN_ATTEMPTS.
+    failed_paths: Vec<(String, u32)>,
 
     // Optional user-pinned serial->slot assignment, index = desired slot
     // (0 = P1, 1 = P2). When both connected pads' serials are covered by this,
@@ -685,6 +689,10 @@ fn main_thread_loop(shared: Arc<ManagerShared>) {
 
 // ─── Device Discovery ────────────────────────────────────────────────────────
 
+/// Read-open attempts per device path (one per enumeration, about one a second)
+/// before the path is left alone until the device is unplugged.
+const MAX_OPEN_ATTEMPTS: u32 = 30;
+
 fn attempt_connections(shared: &Arc<ManagerShared>) {
     // Check if we should enumerate (rate limit + slot availability).
     {
@@ -718,7 +726,7 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
     // Clear failed paths that are no longer in the enumeration (device was unplugged).
     state
         .failed_paths
-        .retain(|p| devs.iter().any(|d| d.path == *p));
+        .retain(|(p, _)| devs.iter().any(|d| d.path == *p));
 
     for dev_info in devs {
         if dev_info.path.is_empty() {
@@ -729,7 +737,11 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
             continue;
         }
 
-        if state.failed_paths.contains(&dev_info.path) {
+        if state
+            .failed_paths
+            .iter()
+            .any(|(p, attempts)| *p == dev_info.path && *attempts >= MAX_OPEN_ATTEMPTS)
+        {
             continue;
         }
 
@@ -759,8 +771,31 @@ fn attempt_connections(shared: &Arc<ManagerShared>) {
             let read_device = match enumerator.open(&dev_info.path) {
                 Ok(d) => d,
                 Err(e) => {
-                    log::error!("Error opening device {} (read): {e}", dev_info.path);
-                    state.failed_paths.push(dev_info.path.clone());
+                    let attempts = match state
+                        .failed_paths
+                        .iter_mut()
+                        .find(|(p, _)| *p == dev_info.path)
+                    {
+                        Some((_, attempts)) => {
+                            *attempts += 1;
+                            *attempts
+                        }
+                        None => {
+                            state.failed_paths.push((dev_info.path.clone(), 1));
+                            1
+                        }
+                    };
+                    if attempts >= MAX_OPEN_ATTEMPTS {
+                        log::error!(
+                            "Error opening device {} (read), giving up after {attempts} attempts: {e}",
+                            dev_info.path
+                        );
+                    } else if attempts == 1 {
+                        log::warn!(
+                            "Error opening device {} (read), will retry: {e}",
+                            dev_info.path
+                        );
+                    }
                     continue;
                 }
             };
